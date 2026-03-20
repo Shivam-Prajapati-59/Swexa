@@ -1,136 +1,104 @@
-use anchor_lang::{prelude::*, solana_program::instruction::Instruction};
-use anchor_spl::token_interface::{InterfaceAccount, TokenAccount};
-use arrayref::array_ref;
+use anchor_lang::{
+    prelude::*, solana_program::instruction::Instruction, solana_program::program::invoke,
+};
 
 pub const ACCOUNTS_LEN: usize = 14;
+pub const SWAP_SELECTOR: &[u8] = &[248, 198, 158, 145, 225, 117, 135, 200];
 
 pub struct WhirlpoolAccounts<'info> {
-    pub token_program: &'info AccountInfo<'info>,
-    pub swap_authority_pubkey: &'info AccountInfo<'info>, // signer (or PDA)
-    pub swap_source_token: InterfaceAccount<'info, TokenAccount>,
-    pub swap_destination_token: InterfaceAccount<'info, TokenAccount>,
-
-    pub token_authority: &'info AccountInfo<'info>,
-    pub whirlpool: &'info AccountInfo<'info>,
-    pub token_owner_account_a: InterfaceAccount<'info, TokenAccount>,
-    pub token_vault_a: InterfaceAccount<'info, TokenAccount>,
-    pub token_owner_account_b: InterfaceAccount<'info, TokenAccount>,
-    pub token_vault_b: InterfaceAccount<'info, TokenAccount>,
-
-    pub tick_array0: &'info AccountInfo<'info>,
-    pub tick_array1: &'info AccountInfo<'info>,
-    pub tick_array2: &'info AccountInfo<'info>,
-    pub oracle: &'info AccountInfo<'info>, // PDA (readonly/writable depending)
+    pub whirlpool_program: AccountInfo<'info>,
+    pub token_program: AccountInfo<'info>,
+    pub token_authority: AccountInfo<'info>,
+    pub whirlpool: AccountInfo<'info>,
+    pub token_owner_account_a: AccountInfo<'info>,
+    pub token_vault_a: AccountInfo<'info>,
+    pub token_owner_account_b: AccountInfo<'info>,
+    pub token_vault_b: AccountInfo<'info>,
+    pub tick_array0: AccountInfo<'info>,
+    pub tick_array1: AccountInfo<'info>,
+    pub tick_array2: AccountInfo<'info>,
+    pub oracle: AccountInfo<'info>,
 }
 
-impl<'info> WhirlpoolAccounts<'info> {
-    pub fn parse_accounts(accounts: &'info [AccountInfo<'info>], offset: usize) -> Result<Self> {
-        // ACCOUNTS_LEN must equal number of elements below (14)
-        let [
-            token_program,
-            swap_authority_pubkey,
-            swap_source_token,
-            swap_destination_token,
-            token_authority,
-            whirlpool,
-            token_owner_account_a,
-            token_vault_a,
-            token_owner_account_b,
-            token_vault_b,
-            tick_array0,
-            tick_array1,
-            tick_array2,
-            oracle,
-        ]: &[AccountInfo<'info>; ACCOUNTS_LEN] = array_ref![accounts, offset, ACCOUNTS_LEN];
-
-        Ok(Self {
-            token_program,
-            swap_authority_pubkey,
-            swap_source_token: InterfaceAccount::try_from(swap_source_token)?,
-            swap_destination_token: InterfaceAccount::try_from(swap_destination_token)?,
-            token_authority,
-            whirlpool,
-            token_owner_account_a: InterfaceAccount::try_from(token_owner_account_a)?,
-            token_vault_a: InterfaceAccount::try_from(token_vault_a)?,
-            token_owner_account_b: InterfaceAccount::try_from(token_owner_account_b)?,
-            token_vault_b: InterfaceAccount::try_from(token_vault_b)?,
-            tick_array0,
-            tick_array1,
-            tick_array2,
-            oracle,
-        })
-    }
+#[derive(AnchorSerialize, AnchorDeserialize)]
+pub struct SwapArgs {
+    pub amount: u64,
+    pub other_amount_threshold: u64,
+    pub sqrt_price_limit: u128,
+    pub amount_specified_is_input: bool,
+    pub a_to_b: bool,
 }
 
-pub fn swap<'a>(remaining_accounts: &'a [AccountInfo<'a>], amount_in: u64) {
+pub fn swap<'a>(
+    accounts: &WhirlpoolAccounts<'a>,
+    swap_source_mint: &Pubkey,
+    swap_destination_mint: &Pubkey,
+    vault_a_mint: &Pubkey,
+    vault_b_mint: &Pubkey,
+    amount_in: u64,
+) -> Result<()> {
     let amount_specified_is_input = true;
     let other_amount_threshold = 1u64;
-    let a_to_b: bool;
-    let sqrt_price_limit: u128;
 
-    let amount_specified_is_input = true;
-    let other_amount_threshold = 1u64;
-    let a_to_b: bool;
-    let sqrt_price_limit: i128;
-
-    if swap_accounts.swap_source_token.mint == swap_accounts.token_vault_a.mint
-        && swap_accounts.swap_destination_token.mint == swap_accounts.token_vault_b.mint
-    {
-        a_to_b = true;
-        sqrt_price_limit = 4295048016; //The minimum sqrt-price supported by the Whirlpool program.
-    } else if swap_accounts.swap_source_token.mint == swap_accounts.token_vault_b.mint
-        && swap_accounts.swap_destination_token.mint == swap_accounts.token_vault_a.mint
-    {
-        a_to_b = false;
-        sqrt_price_limit = 79226673515401279992447579055; //The maximum sqrt-price supported by the Whirlpool program.
+    let a_to_b = if swap_source_mint == vault_a_mint && swap_destination_mint == vault_b_mint {
+        true
+    } else if swap_source_mint == vault_b_mint && swap_destination_mint == vault_a_mint {
+        false
     } else {
-        return Err(ErrorCode::InvalidTokenMint.into());
-    }
-    let (token_owner_account_a, token_owner_account_b) = if a_to_b {
-        (
-            swap_accounts.swap_source_token.clone(),
-            swap_accounts.swap_destination_token.clone(),
-        )
-    } else {
-        (
-            swap_accounts.swap_destination_token.clone(),
-            swap_accounts.swap_source_token.clone(),
-        )
+        return Err(ProgramError::InvalidInstructionData.into()); // Mint mismatch
     };
-    let account_infos = [
-        swap_accounts.token_program.to_account_info(),
-        swap_accounts.swap_authority_pubkey.to_account_info(),
-        swap_accounts.whirlpool.to_account_info(),
-        token_owner_account_a.to_account_info(),
-        swap_accounts.token_vault_a.to_account_info(),
-        token_owner_account_b.to_account_info(),
-        swap_accounts.token_vault_b.to_account_info(),
-        swap_accounts.tick_array0.to_account_info(),
-        swap_accounts.tick_array1.to_account_info(),
-        swap_accounts.tick_array2.to_account_info(),
-        swap_accounts.oracle.to_account_info(),
+
+    // Limits
+    let sqrt_price_limit: u128 = if a_to_b {
+        4295048016 // MIN
+    } else {
+        79226673515401279992447579055 // MAX
+    };
+
+    let args = SwapArgs {
+        amount: amount_in,
+        other_amount_threshold,
+        sqrt_price_limit,
+        amount_specified_is_input,
+        a_to_b,
+    };
+
+    let mut data = SWAP_SELECTOR.to_vec();
+    args.serialize(&mut data)?;
+
+    let account_infos = vec![
+        accounts.token_program.clone(),
+        accounts.token_authority.clone(),
+        accounts.whirlpool.clone(),
+        accounts.token_owner_account_a.clone(),
+        accounts.token_vault_a.clone(),
+        accounts.token_owner_account_b.clone(),
+        accounts.token_vault_b.clone(),
+        accounts.tick_array0.clone(),
+        accounts.tick_array1.clone(),
+        accounts.tick_array2.clone(),
+        accounts.oracle.clone(),
     ];
 
     let instruction = Instruction {
-        program_id: swap_accounts.dex_program_id.key(),
-        accounts,
+        program_id: accounts.whirlpool_program.key(),
+        accounts: vec![
+            AccountMeta::new_readonly(accounts.token_program.key(), false),
+            AccountMeta::new_readonly(accounts.token_authority.key(), true),
+            AccountMeta::new(accounts.whirlpool.key(), false),
+            AccountMeta::new(accounts.token_owner_account_a.key(), false),
+            AccountMeta::new(accounts.token_vault_a.key(), false),
+            AccountMeta::new(accounts.token_owner_account_b.key(), false),
+            AccountMeta::new(accounts.token_vault_b.key(), false),
+            AccountMeta::new(accounts.tick_array0.key(), false),
+            AccountMeta::new(accounts.tick_array1.key(), false),
+            AccountMeta::new(accounts.tick_array2.key(), false),
+            AccountMeta::new_readonly(accounts.oracle.key(), false),
+        ],
         data,
     };
 
-    let dex_processor = &WhirlpoolProcessor;
-    let amount_out = invoke_process(
-        amount_in,
-        dex_processor,
-        &account_infos,
-        &mut swap_accounts.swap_source_token,
-        &mut swap_accounts.swap_destination_token,
-        hop_accounts,
-        instruction,
-        hop,
-        offset,
-        ACCOUNTS_LEN,
-        proxy_swap,
-        owner_seeds,
-    )?;
-    Ok(amount_out)
+    invoke(&instruction, &account_infos)?;
+
+    Ok(())
 }

@@ -6,7 +6,7 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-cross_swap = "6ekyw6hMkdvfKsEBDHToPiesL3GCUybhtUV2Jois5cWH"
+cross_swap = "D5WaQNE3jj8NJ97hq9Y38xansEerSrbLiohGRjexZC3p"
 
 [registry]
 url = "https://api.apr.dev"
@@ -17,3 +17,40 @@ wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 \"tests/**/*.ts\""
+
+[test]
+startup_wait = 20000
+
+[test.validator]
+url = "https://api.mainnet-beta.solana.com"
+bind_address = "127.0.0.1"
+
+# Clone the Orca Whirlpool Program
+[[test.validator.clone]]
+address = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc"
+[[test.validator.clone]]
+address = "CtXfPzz36dH5Ws4UYKZvrQ1Xqzn42ecDW6y8NKuiN8nD" # Whirlpool Program Data
+
+# Token Mint
+[[test.validator.clone]]
+address = "So11111111111111111111111111111111111111112" # WSOL_MINT
+[[test.validator.clone]]
+address = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v" # USDC_MINT
+[[test.validator.clone]]
+address = "Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB" # USDT_MINT
+[[test.validator.clone]]
+address = "mSoLzYCxHdYgdzU16g5QSh3i5K3z3KZK7ytfqcJm7So" # mSOL_MINT
+
+# New Whirlpool pool + dependent accounts (WSOL/USDC)
+[[test.validator.clone]]
+address = "Czfq3xZZDmsdGdUyrNLtRhGc47cXcZtLG4crryfu44zE" # Whirlpool
+[[test.validator.clone]]
+address = "EUuUbDcafPrmVTD5M6qoJAoyyNbihBhugADAxRMn5he9" # tokenVaultA
+[[test.validator.clone]]
+address = "2WLWEuKDgkDUccTpbwYp1GToYktiSB1cXvreHUwiSUVP" # tokenVaultB
+[[test.validator.clone]]
+address = "FhCuVGm1UYYevgc6xtMU8s96Au4zQzeS1VFqtKHB1xZe" # tickArray0
+[[test.validator.clone]]
+address = "99uf6aziV5imEaqsXRmiAg4wwDADZ3McWGYPZfjkgzLd" # tickArray1 (a_to_b)
+[[test.validator.clone]]
+address = "Dsb9ogdvNLTtefz48ZBb6XUewrsHGmwQ82W8RMiQc5E1" # tickArray2 (a_to_b)
