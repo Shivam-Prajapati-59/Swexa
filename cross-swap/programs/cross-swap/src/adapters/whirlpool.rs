@@ -2,8 +2,8 @@ use anchor_lang::{
     prelude::*, solana_program::instruction::Instruction, solana_program::program::invoke,
 };
 
-pub const ACCOUNTS_LEN: usize = 14;
 pub const SWAP_SELECTOR: &[u8] = &[248, 198, 158, 145, 225, 117, 135, 200];
+const ACCOUNTS_LEN: usize = 19;
 
 pub struct WhirlpoolAccounts<'info> {
     pub whirlpool_program: AccountInfo<'info>,
