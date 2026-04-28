@@ -1,94 +1,80 @@
-use solana_client::rpc_client::RpcClient;
-use solana_sdk::pubkey::Pubkey;
-use std::str::FromStr;
+use serde::Deserialize;
 
-const WHIRLPOOL_PROGRAM_ID: &str = "whirLbMiicVdio4qvUfM5KAg6Ct8VwpYzGff3uctyCc";
+use crate::types::{DexProtocol, PoolEdge, PoolType, TokenMint};
 
-// Added #[allow(dead_code)] if you're building a library and want to
-// silence the warning without necessarily reading every field.
-#[allow(dead_code)]
-#[derive(Debug)]
-pub struct WhirlpoolPoolData {
-    pub liquidity: u128,
-    pub sqrt_price_x64: u128,
-    pub tick_current_index: i32,
-    pub token_mint_a: Pubkey,
-    pub token_mint_b: Pubkey,
+// ── Orca Whirlpool API response types ──────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+pub struct OrcaToken {
+    pub mint: String,
+    #[serde(default)]
+    pub symbol: String,
+    pub decimals: u8,
 }
 
-pub fn fetch_whirlpool_pool(
-    rpc_url: &str,
-    pool_address: &str,
-) -> anyhow::Result<WhirlpoolPoolData> {
-    let client = RpcClient::new(rpc_url.to_string());
+#[derive(Debug, Deserialize)]
+pub struct OrcaWhirlpool {
+    pub address: String,
 
-    // FIX: Trim whitespace/newlines and add detailed error context
-    let pool_pubkey = Pubkey::from_str(pool_address.trim()).map_err(|_| {
-        anyhow::anyhow!("Failed to parse pool address as Base58: '{}'", pool_address)
-    })?;
+    #[serde(rename = "tokenA")]
+    pub token_a: OrcaToken,
+    #[serde(rename = "tokenB")]
+    pub token_b: OrcaToken,
 
-    let program_id = Pubkey::from_str(WHIRLPOOL_PROGRAM_ID)?;
+    #[serde(rename = "tickSpacing")]
+    pub tick_spacing: u16,
+    #[serde(rename = "lpFeeRate")]
+    pub lp_fee_rate: f64,
+    #[serde(rename = "protocolFeeRate")]
+    pub protocol_fee_rate: f64,
 
-    let account = client.get_account(&pool_pubkey)?;
-
-    if account.owner != program_id {
-        anyhow::bail!("Account is not owned by Whirlpool program");
-    }
-
-    let data = &account.data;
-    if data.len() < 213 {
-        anyhow::bail!("Account data too short");
-    }
-
-    let liquidity = u128::from_le_bytes(data[49..65].try_into()?);
-    let sqrt_price_x64 = u128::from_le_bytes(data[65..81].try_into()?);
-    let tick_current_index = i32::from_le_bytes(data[81..85].try_into()?);
-    let token_mint_a = Pubkey::new_from_array(data[101..133].try_into()?);
-    let token_mint_b = Pubkey::new_from_array(data[181..213].try_into()?);
-
-    Ok(WhirlpoolPoolData {
-        liquidity,
-        sqrt_price_x64,
-        tick_current_index,
-        token_mint_a,
-        token_mint_b,
-    })
+    pub tvl: f64,
 }
 
-#[allow(deprecated)]
-pub fn fetch_all_whirlpools(rpc_url: &str) -> anyhow::Result<Vec<(Pubkey, WhirlpoolPoolData)>> {
-    let client = RpcClient::new(rpc_url.to_string());
-    let program_id = Pubkey::from_str(WHIRLPOOL_PROGRAM_ID)?;
+#[derive(Debug, Deserialize)]
+pub struct OrcaWhirlpoolListResponse {
+    pub whirlpools: Vec<OrcaWhirlpool>,
+}
 
-    println!("Fetching all pools... (This might take a moment)");
+// ── Conversion to common PoolEdge ──────────────────────────────────────────
 
-    // Fetch all Whirlpool-owned accounts as raw binary data.
-    let accounts = client.get_program_accounts(&program_id)?;
-    let mut all_pools = Vec::new();
-
-    // 3. Iterate and parse each pool
-    for (pubkey, account) in accounts {
-        let data = &account.data;
-
-        if data.len() == 656 {
-            let liquidity = u128::from_le_bytes(data[49..65].try_into()?);
-            let sqrt_price_x64 = u128::from_le_bytes(data[65..81].try_into()?);
-            let tick_current_index = i32::from_le_bytes(data[81..85].try_into()?);
-            let token_mint_a = Pubkey::new_from_array(data[101..133].try_into()?);
-            let token_mint_b = Pubkey::new_from_array(data[181..213].try_into()?);
-
-            let pool_data = WhirlpoolPoolData {
-                liquidity,
-                sqrt_price_x64,
-                tick_current_index,
-                token_mint_a,
-                token_mint_b,
-            };
-
-            all_pools.push((pubkey, pool_data));
+impl From<OrcaWhirlpool> for PoolEdge {
+    fn from(w: OrcaWhirlpool) -> Self {
+        PoolEdge {
+            address: w.address,
+            dex: DexProtocol::Whirlpool,
+            token_a: TokenMint {
+                mint: w.token_a.mint,
+                symbol: w.token_a.symbol,
+                decimals: w.token_a.decimals,
+            },
+            token_b: TokenMint {
+                mint: w.token_b.mint,
+                symbol: w.token_b.symbol,
+                decimals: w.token_b.decimals,
+            },
+            fee_rate: w.lp_fee_rate,
+            tvl: w.tvl,
+            // Whirlpools are always concentrated liquidity.
+            pool_type: PoolType::ConcentratedLiquidity,
         }
     }
+}
 
-    println!("Successfully fetched {} pools.", all_pools.len());
-    Ok(all_pools)
+// ── API fetcher ────────────────────────────────────────────────────────────
+
+/// Fetches all available pools from the Orca Whirlpool API.
+pub async fn fetch_whirlpools_api() -> anyhow::Result<Vec<OrcaWhirlpool>> {
+    let url = "https://api.mainnet.orca.so/v1/whirlpool/list";
+    println!("Fetching pools from Orca Whirlpool API...");
+
+    let response = reqwest::get(url).await?;
+    let data: OrcaWhirlpoolListResponse = response.json().await?;
+
+    println!(
+        "Successfully fetched {} Whirlpool pools via API.",
+        data.whirlpools.len()
+    );
+
+    Ok(data.whirlpools)
 }
