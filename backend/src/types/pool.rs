@@ -8,6 +8,7 @@ use std::fmt;
 pub enum DexProtocol {
     Whirlpool,
     Raydium,
+    Meteora,
 }
 
 impl fmt::Display for DexProtocol {
@@ -15,6 +16,7 @@ impl fmt::Display for DexProtocol {
         match self {
             DexProtocol::Whirlpool => write!(f, "Whirlpool"),
             DexProtocol::Raydium => write!(f, "Raydium"),
+            DexProtocol::Meteora => write!(f, "Meteora"),
         }
     }
 }
@@ -28,6 +30,8 @@ pub enum PoolType {
     Amm,
     /// Concentrated-liquidity market maker (tick-based).
     ConcentratedLiquidity,
+    /// Dynamic Liquidity Market Maker (bin-based).
+    Dlmm,
 }
 
 impl fmt::Display for PoolType {
@@ -35,6 +39,7 @@ impl fmt::Display for PoolType {
         match self {
             PoolType::Amm => write!(f, "AMM"),
             PoolType::ConcentratedLiquidity => write!(f, "CLMM"),
+            PoolType::Dlmm => write!(f, "DLMM"),
         }
     }
 }

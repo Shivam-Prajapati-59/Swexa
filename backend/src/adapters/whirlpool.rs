@@ -22,11 +22,11 @@ pub struct OrcaWhirlpool {
     pub token_b: OrcaToken,
 
     #[serde(rename = "tickSpacing")]
-    pub tick_spacing: u16,
+    pub _tick_spacing: u16,
     #[serde(rename = "lpFeeRate")]
     pub lp_fee_rate: f64,
     #[serde(rename = "protocolFeeRate")]
-    pub protocol_fee_rate: f64,
+    pub _protocol_fee_rate: f64,
 
     pub tvl: f64,
 }

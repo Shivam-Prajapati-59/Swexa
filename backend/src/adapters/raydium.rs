@@ -16,7 +16,7 @@ pub struct RaydiumMintInfo {
 #[derive(Debug, Deserialize)]
 pub struct RaydiumPoolConfig {
     #[serde(rename = "tickSpacing")]
-    pub tick_spacing: Option<u16>,
+    pub _tick_spacing: Option<u16>,
 }
 
 /// A single pool entry from the Raydium V3 `/pools/info/list` endpoint.
@@ -43,13 +43,15 @@ pub struct RaydiumPoolInfo {
     pub tvl: f64,
 
     /// Optional nested config (present on CLMM pools).
-    pub config: Option<RaydiumPoolConfig>,
+    #[serde(rename = "config")]
+    pub _config: Option<RaydiumPoolConfig>,
 }
 
 /// Inner `data` wrapper: `{ count, data: [...] }`.
 #[derive(Debug, Deserialize)]
 pub struct RaydiumDataInner {
-    pub count: u64,
+    #[serde(rename = "count")]
+    pub _count: u64,
     pub data: Vec<RaydiumPoolInfo>,
 }
 

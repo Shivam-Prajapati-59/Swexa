@@ -332,6 +332,7 @@ dependencies = [
  "solana-client",
  "solana-sdk",
  "tokio",
+ "tower",
 ]
 
 [[package]]

@@ -1,3 +1,3 @@
 pub mod pool;
 
-pub use pool::{DexProtocol, PoolEdge, PoolType, TokenMint, DEFAULT_MIN_TVL};
+pub use pool::{DEFAULT_MIN_TVL, DexProtocol, PoolEdge, PoolType, TokenMint};
