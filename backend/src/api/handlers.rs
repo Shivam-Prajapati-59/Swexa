@@ -1,6 +1,6 @@
 use crate::api::models::{
     ErrorResponse, HealthResponse, QuoteQuery, QuoteResponse, QuotedRouteSummary, RouteQuery,
-    RoutesResponse,
+    RoutesResponse, SimulatedQuoteResponse, SimulatedQuotedRouteSummary,
 };
 use crate::api::state::AppState;
 use crate::api::support::{build_graph_stats_response, find_candidate_routes, summarize_route};
@@ -57,10 +57,15 @@ pub async fn find_routes(
     }))
 }
 
+/// `/quote` endpoint — attempts SVM simulation first, falls back to heuristic.
+///
+/// Query params:
+/// - `heuristic_only=true` forces the old heuristic-only path
+/// - Default behavior: simulate → fallback to heuristic on error
 pub async fn find_best_quote(
     State(state): State<Arc<AppState>>,
     Query(query): Query<QuoteQuery>,
-) -> impl IntoResponse {
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<ErrorResponse>)> {
     if query.amount_in == 0 {
         return Err(bad_request("amount_in must be greater than zero"));
     }
@@ -76,6 +81,81 @@ pub async fn find_best_quote(
         return Err(bad_request("source_mint and target_mint must be different"));
     };
 
+    if routes.is_empty() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(ErrorResponse {
+                error: "no routes found between the given tokens".to_string(),
+            }),
+        ));
+    }
+
+    // ── Simulation path (default) ──────────────────────────────────────
+    if !query.heuristic_only {
+        match state.simulated_engine.find_best_route(
+            &routes,
+            &query.source_mint,
+            &query.target_mint,
+            query.amount_in,
+        ) {
+            Ok(sim_result) => {
+                let best_route_index = sim_result.best.route_index;
+                let best_path = if best_route_index < routes.len() {
+                    summarize_route(&query.source_mint, &routes[best_route_index])
+                } else {
+                    summarize_route(
+                        &query.source_mint,
+                        &routes[sim_result.all_quotes.first().map(|q| q.route_index).unwrap_or(0)],
+                    )
+                };
+
+                let all_quotes = sim_result
+                    .all_quotes
+                    .iter()
+                    .filter_map(|q| {
+                        if q.route_index < routes.len() {
+                            Some(SimulatedQuotedRouteSummary {
+                                route_index: q.route_index,
+                                amount_out: q.amount_out,
+                                simulated: q.simulated,
+                                fallback_reason: q.fallback_reason.clone(),
+                                route: summarize_route(&query.source_mint, &routes[q.route_index]),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+
+                let response = SimulatedQuoteResponse {
+                    quote_method: sim_result.quote_method,
+                    source_mint: query.source_mint.clone(),
+                    target_mint: query.target_mint.clone(),
+                    amount_in: query.amount_in,
+                    requested_max_hops: query.max_hops,
+                    effective_max_hops,
+                    candidate_route_count: routes.len(),
+                    best: sim_result.best,
+                    best_path,
+                    all_quotes,
+                    split: sim_result.split,
+                };
+
+                return serde_json::to_value(response)
+                    .map(|v| Json(v))
+                    .map_err(|e| internal_error(&format!("response serialization failed: {e}")));
+            }
+            Err(sim_err) => {
+                eprintln!(
+                    "[SimQuote] simulation failed, falling back to heuristic: {}",
+                    sim_err
+                );
+                // Fall through to heuristic path below
+            }
+        }
+    }
+
+    // ── Heuristic path (fallback or heuristic_only=true) ───────────────
     let Some(best) = QuoteEngine::find_best_route(&routes, query.amount_in) else {
         return Err((
             StatusCode::NOT_FOUND,
@@ -85,7 +165,7 @@ pub async fn find_best_quote(
         ));
     };
 
-    let quoted_routes = routes
+    let mut quoted_routes = routes
         .iter()
         .enumerate()
         .filter_map(|(route_index, route)| {
@@ -95,25 +175,66 @@ pub async fn find_best_quote(
                 route: summarize_route(&query.source_mint, route),
             })
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    Ok(Json(QuoteResponse {
+    quoted_routes.sort_by(|left, right| {
+        right
+            .quote
+            .estimated_amount_out
+            .cmp(&left.quote.estimated_amount_out)
+            .then_with(|| {
+                left.quote
+                    .price_impact_bps
+                    .cmp(&right.quote.price_impact_bps)
+            })
+            .then_with(|| left.route.hops.cmp(&right.route.hops))
+    });
+
+    let quote_method = if query.heuristic_only {
+        "heuristic-phase1"
+    } else {
+        "heuristic-fallback"
+    };
+
+    let best_route = routes.get(best.best_route_index).ok_or_else(|| {
+        internal_error(&format!(
+            "best_route_index {} out of bounds (routes.len()={})",
+            best.best_route_index,
+            routes.len()
+        ))
+    })?;
+
+    let response = QuoteResponse {
+        quote_method,
         source_mint: query.source_mint.clone(),
         target_mint: query.target_mint.clone(),
         amount_in: query.amount_in,
         requested_max_hops: query.max_hops,
         effective_max_hops,
         candidate_route_count: routes.len(),
-        best_route_index: best.best_route_index,
+        best_path_index: best.best_route_index,
         best_quote: best.quote,
-        best_route: summarize_route(&query.source_mint, &routes[best.best_route_index]),
+        best_path: summarize_route(&query.source_mint, best_route),
         quoted_routes,
-    }))
+    };
+
+    serde_json::to_value(response)
+        .map(|v| Json(v))
+        .map_err(|e| internal_error(&format!("response serialization failed: {e}")))
 }
 
 fn bad_request(message: &str) -> (StatusCode, Json<ErrorResponse>) {
     (
         StatusCode::BAD_REQUEST,
+        Json(ErrorResponse {
+            error: message.to_string(),
+        }),
+    )
+}
+
+fn internal_error(message: &str) -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
         Json(ErrorResponse {
             error: message.to_string(),
         }),

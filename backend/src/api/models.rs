@@ -1,4 +1,5 @@
 use crate::engine::quote::RouteQuote;
+use crate::engine::simulated_quote::{SimulatedRouteQuote, SplitResult};
 use crate::routing::{GraphStats, GraphValidationReport, MAX_SUPPORTED_HOPS};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -40,6 +41,9 @@ pub struct QuoteQuery {
     pub exact_hops: Option<usize>,
     #[serde(default = "default_limit")]
     pub limit: usize,
+    /// If `true`, forces the heuristic-only path (skips simulation).
+    #[serde(default)]
+    pub heuristic_only: bool,
 }
 
 #[derive(Serialize)]
@@ -52,18 +56,51 @@ pub struct RoutesResponse {
     pub routes: Vec<RouteSummary>,
 }
 
+/// Unified quote response that works for both heuristic and simulated modes.
 #[derive(Serialize)]
 pub struct QuoteResponse {
+    pub quote_method: &'static str,
     pub source_mint: String,
     pub target_mint: String,
     pub amount_in: u64,
     pub requested_max_hops: usize,
     pub effective_max_hops: usize,
     pub candidate_route_count: usize,
-    pub best_route_index: usize,
+    pub best_path_index: usize,
     pub best_quote: RouteQuote,
-    pub best_route: RouteSummary,
+    pub best_path: RouteSummary,
     pub quoted_routes: Vec<QuotedRouteSummary>,
+}
+
+/// Extended quote response when using the SVM simulator.
+#[derive(Serialize)]
+pub struct SimulatedQuoteResponse {
+    pub quote_method: &'static str,
+    pub source_mint: String,
+    pub target_mint: String,
+    pub amount_in: u64,
+    pub requested_max_hops: usize,
+    pub effective_max_hops: usize,
+    pub candidate_route_count: usize,
+    /// The best single route or split.
+    pub best: SimulatedRouteQuote,
+    /// The best route's path summary.
+    pub best_path: RouteSummary,
+    /// All individual route simulations.
+    pub all_quotes: Vec<SimulatedQuotedRouteSummary>,
+    /// If splitting improved the result, details are here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub split: Option<SplitResult>,
+}
+
+#[derive(Serialize)]
+pub struct SimulatedQuotedRouteSummary {
+    pub route_index: usize,
+    pub amount_out: u64,
+    pub simulated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_reason: Option<String>,
+    pub route: RouteSummary,
 }
 
 #[derive(Serialize)]

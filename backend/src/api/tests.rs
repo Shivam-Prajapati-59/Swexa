@@ -85,7 +85,35 @@ async fn routes_endpoint_returns_four_hop_candidate() {
 }
 
 #[tokio::test]
-async fn quote_endpoint_returns_best_route() {
+async fn quote_endpoint_returns_best_route_heuristic() {
+    // Use heuristic_only=true to test the backward-compatible path
+    let response = app()
+        .oneshot(
+            Request::builder()
+                .uri("/quote?source_mint=A&target_mint=E&amount_in=1000&max_hops=4&limit=10&heuristic_only=true")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+
+    assert_eq!(json["amount_in"], 1000);
+    assert_eq!(json["quote_method"], "heuristic-phase1");
+    assert!(json["candidate_route_count"].as_u64().unwrap() > 0);
+    assert_eq!(
+        json["best_path"]["path"][0]["pool_address"],
+        serde_json::Value::String("deep-ae".to_string())
+    );
+}
+
+#[tokio::test]
+async fn quote_endpoint_falls_back_gracefully() {
+    // Without heuristic_only, the simulated engine will try simulation,
+    // fail (no real RPC), and fall back to heuristic.
     let response = app()
         .oneshot(
             Request::builder()
@@ -100,12 +128,13 @@ async fn quote_endpoint_returns_best_route() {
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
 
-    assert_eq!(json["amount_in"], 1000);
-    assert!(json["candidate_route_count"].as_u64().unwrap() > 0);
-    assert_eq!(
-        json["best_route"]["path"][0]["pool_address"],
-        serde_json::Value::String("deep-ae".to_string())
+    // Should have fallen back or used simulation-with-fallback
+    let method = json["quote_method"].as_str().unwrap();
+    assert!(
+        method == "heuristic-fallback" || method == "simulated" || method == "simulated-split",
+        "unexpected quote_method: {method}"
     );
+    assert!(json["amount_in"] == 1000);
 }
 
 #[tokio::test]
