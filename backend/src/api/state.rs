@@ -1,4 +1,4 @@
-use crate::engine::simulated_quote::SimulatedQuoteEngine;
+use crate::simulation::simulated_quote::SimulatedQuoteEngine;
 use crate::routing::{GraphStats, GraphValidationReport, RouteGraph};
 use crate::types::PoolEdge;
 

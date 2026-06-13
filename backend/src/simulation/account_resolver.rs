@@ -8,7 +8,7 @@
 //! The resolved addresses are then passed to the instruction builder to
 //! construct the swap instruction for the lite-svm simulator.
 
-use crate::engine::instruction_builder::SwapAccounts;
+use crate::simulation::instruction_builder::SwapAccounts;
 use crate::types::{DexProtocol, PoolEdge, PoolType};
 use anyhow::{Result, anyhow};
 use solana_account::Account;

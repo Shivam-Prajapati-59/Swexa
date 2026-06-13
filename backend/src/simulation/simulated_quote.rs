@@ -17,12 +17,12 @@
 //! allocations (e.g. 70/30, 60/40) across the top-N routes and picks
 //! the combination yielding the highest total output.
 
-use crate::engine::account_resolver::{self, AccountCache, derive_simulated_ata};
-use crate::engine::fetcher::AccountFetcher;
-use crate::engine::instruction_builder::{
+use crate::simulation::account_resolver::{self, AccountCache, derive_simulated_ata};
+use crate::simulation::fetcher::AccountFetcher;
+use crate::simulation::instruction_builder::{
     build_swap_instruction, output_mint_for_hop, resolve_direction,
 };
-use crate::engine::simulator::{QuoteSimulator, SimulationQuote};
+use crate::simulation::simulator::{QuoteSimulator, SimulationQuote};
 use crate::routing::Route;
 use crate::types::PoolEdge;
 use anyhow::{Result, anyhow};

@@ -1,5 +1,5 @@
 use crate::engine::quote::RouteQuote;
-use crate::engine::simulated_quote::{SimulatedRouteQuote, SplitResult};
+use crate::simulation::simulated_quote::{SimulatedRouteQuote, SplitResult};
 use crate::routing::{GraphStats, GraphValidationReport, MAX_SUPPORTED_HOPS};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;

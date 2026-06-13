@@ -3,6 +3,7 @@ mod api;
 mod config;
 mod engine;
 mod routing;
+mod simulation;
 mod types;
 
 use adapters::fetch_all_pools;
