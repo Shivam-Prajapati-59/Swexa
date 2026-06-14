@@ -92,65 +92,95 @@ pub async fn find_best_quote(
 
     // ── Simulation path (default) ──────────────────────────────────────
     if !query.heuristic_only {
-        match state.simulated_engine.find_best_route(
-            &routes,
-            &query.source_mint,
-            &query.target_mint,
-            query.amount_in,
-        ) {
-            Ok(sim_result) => {
-                let best_route_index = sim_result.best.route_index;
-                let best_path = if best_route_index < routes.len() {
-                    summarize_route(&query.source_mint, &routes[best_route_index])
-                } else {
-                    summarize_route(
-                        &query.source_mint,
-                        &routes[sim_result.all_quotes.first().map(|q| q.route_index).unwrap_or(0)],
-                    )
-                };
+        // Step 1: Run the heuristic optimizer to select top-K routes
+        let optimized =
+            crate::routing::optimizer::select_top_routes(&routes, query.amount_in, None);
 
-                let all_quotes = sim_result
-                    .all_quotes
-                    .iter()
-                    .filter_map(|q| {
-                        if q.route_index < routes.len() {
-                            Some(SimulatedQuotedRouteSummary {
-                                route_index: q.route_index,
-                                amount_out: q.amount_out,
-                                simulated: q.simulated,
-                                fallback_reason: q.fallback_reason.clone(),
-                                route: summarize_route(&query.source_mint, &routes[q.route_index]),
-                            })
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
+        eprintln!(
+            "[Optimizer] {} candidates → {} after filtering → top {} selected",
+            optimized.total_candidates,
+            optimized.after_filtering,
+            optimized.top_routes.len(),
+        );
 
-                let response = SimulatedQuoteResponse {
-                    quote_method: sim_result.quote_method,
-                    source_mint: query.source_mint.clone(),
-                    target_mint: query.target_mint.clone(),
-                    amount_in: query.amount_in,
-                    requested_max_hops: query.max_hops,
-                    effective_max_hops,
-                    candidate_route_count: routes.len(),
-                    best: sim_result.best,
-                    best_path,
-                    all_quotes,
-                    split: sim_result.split,
-                };
+        let top_routes = crate::routing::optimizer::extract_routes(&optimized);
 
-                return serde_json::to_value(response)
-                    .map(|v| Json(v))
-                    .map_err(|e| internal_error(&format!("response serialization failed: {e}")));
-            }
-            Err(sim_err) => {
-                eprintln!(
-                    "[SimQuote] simulation failed, falling back to heuristic: {}",
-                    sim_err
-                );
-                // Fall through to heuristic path below
+        if top_routes.is_empty() {
+            eprintln!("[Optimizer] all routes filtered out, falling back to heuristic");
+            // Fall through to the heuristic path below
+        } else {
+            // Step 2: Simulate only the top-K routes
+            match state.simulated_engine.find_best_route(
+                &top_routes,
+                &query.source_mint,
+                &query.target_mint,
+                query.amount_in,
+            ) {
+                Ok(sim_result) => {
+                    // Map simulator indices (which are relative to top_routes)
+                    // back to the original route indices for the response.
+                    let best_route_index = sim_result.best.route_index;
+                    let best_path = if best_route_index < top_routes.len() {
+                        summarize_route(&query.source_mint, &top_routes[best_route_index])
+                    } else {
+                        summarize_route(
+                            &query.source_mint,
+                            &top_routes[sim_result
+                                .all_quotes
+                                .first()
+                                .map(|q| q.route_index)
+                                .unwrap_or(0)],
+                        )
+                    };
+
+                    let all_quotes = sim_result
+                        .all_quotes
+                        .iter()
+                        .filter_map(|q| {
+                            if q.route_index < top_routes.len() {
+                                Some(SimulatedQuotedRouteSummary {
+                                    route_index: q.route_index,
+                                    amount_out: q.amount_out,
+                                    simulated: q.simulated,
+                                    fallback_reason: q.fallback_reason.clone(),
+                                    route: summarize_route(
+                                        &query.source_mint,
+                                        &top_routes[q.route_index],
+                                    ),
+                                })
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+
+                    let response = SimulatedQuoteResponse {
+                        quote_method: sim_result.quote_method,
+                        source_mint: query.source_mint.clone(),
+                        target_mint: query.target_mint.clone(),
+                        amount_in: query.amount_in,
+                        requested_max_hops: query.max_hops,
+                        effective_max_hops,
+                        candidate_route_count: optimized.total_candidates,
+                        best: sim_result.best,
+                        best_path,
+                        all_quotes,
+                        split: sim_result.split,
+                    };
+
+                    return serde_json::to_value(response)
+                        .map(|v| Json(v))
+                        .map_err(|e| {
+                            internal_error(&format!("response serialization failed: {e}"))
+                        });
+                }
+                Err(sim_err) => {
+                    eprintln!(
+                        "[SimQuote] simulation failed, falling back to heuristic: {}",
+                        sim_err
+                    );
+                    // Fall through to heuristic path below
+                }
             }
         }
     }

@@ -1,6 +1,14 @@
 use crate::routing::Route;
 use serde::Serialize;
 
+// ── Hard cutoffs (aligned with routing::optimizer) ────────────────────────
+
+/// Minimum TVL (USD) for any single pool in a route.
+const MIN_POOL_TVL: f64 = 1_000.0;
+
+/// Maximum fee rate for a single hop (1%).
+const MAX_HOP_FEE_RATE: f64 = 0.01;
+
 #[derive(Debug, Clone, Serialize)]
 pub struct RouteQuote {
     pub amount_in: u64,
@@ -39,9 +47,22 @@ impl QuoteEngine {
                 return None;
             }
 
-            let amount_after_fee = amount * (1.0 - pool.fee_rate.clamp(0.0, 1.0));
-            let liquidity = pool.tvl.max(1.0);
-            let slippage_factor = liquidity / (liquidity + amount_after_fee);
+            // ── Hard cutoffs ─────────────────────────────────────────
+            if pool.tvl < MIN_POOL_TVL {
+                return None;
+            }
+            let fee = pool.fee_rate.clamp(0.0, 1.0);
+            if fee > MAX_HOP_FEE_RATE {
+                return None;
+            }
+
+            // ── Heuristic scoring ────────────────────────────────────
+            let amount_after_fee = amount * (1.0 - fee);
+
+            // In a balanced pool ~50% of TVL backs the output token.
+            let pool_output_liquidity = (pool.tvl * 0.5).max(1.0);
+            let slippage_factor =
+                pool_output_liquidity / (pool_output_liquidity + amount_after_fee);
             let price_impact_bps = (1.0 - slippage_factor) * 10_000.0;
 
             amount = amount_after_fee * slippage_factor;
