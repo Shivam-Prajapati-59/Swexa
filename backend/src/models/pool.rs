@@ -61,8 +61,8 @@ pub struct PoolMetadata {
 /// CPMM (Raydium V4, Orca Legacy)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CpmmState {
-    pub reserve_a: u64,
-    pub reserve_b: u64,
+    pub reserve_a: u128,
+    pub reserve_b: u128,
 }
 
 /// Stable Pools (Saber, Meteora Stable)
@@ -126,11 +126,10 @@ pub enum PoolData {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Pool {
     pub metadata: PoolMetadata,
-
     pub data: PoolData,
 
-    /// 30 = 0.30%
-    pub fee_bps: u16,
+    /// Protocol-native fee representation.
+    pub fee_rate: u32,
 
     pub last_updated_slot: u64,
 }

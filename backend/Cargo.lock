@@ -636,6 +636,7 @@ dependencies = [
  "axum",
  "borsh",
  "litesvm",
+ "log",
  "petgraph",
  "reqwest",
  "serde",
