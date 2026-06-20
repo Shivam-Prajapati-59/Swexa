@@ -1,8 +1,33 @@
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use solana_sdk::pubkey::Pubkey;
+use std::str::FromStr;
 
 /// Fixed-size Solana public key representation.
 /// Faster than String and graph-friendly.
-pub type PubkeyBytes = [u8; 32];
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct PubkeyBytes(pub [u8; 32]);
+
+impl Serialize for PubkeyBytes {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        let pubkey = Pubkey::new_from_array(self.0);
+        serializer.serialize_str(&pubkey.to_string())
+    }
+}
+
+impl<'de> Deserialize<'de> for PubkeyBytes {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Pubkey::from_str(&s)
+            .map(|p| PubkeyBytes(p.to_bytes()))
+            .map_err(serde::de::Error::custom)
+    }
+}
 
 /// Internal router pool identifier.
 pub type PoolId = u32;
@@ -20,6 +45,7 @@ pub enum DexProtocol {
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum PoolType {
+    AMM,
     Cpmm,
     Stable,
     Clmm,
@@ -32,6 +58,15 @@ pub enum PoolStatus {
     Active,
     Disabled,
     Deprecated,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PoolToken {
+    pub mint: PubkeyBytes,
+    pub name: String,
+    pub symbol: String,
+    pub decimals: u8,
+    pub vault: Option<PubkeyBytes>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -48,14 +83,8 @@ pub struct PoolMetadata {
 
     pub status: PoolStatus,
 
-    pub token_a_mint: PubkeyBytes,
-    pub token_b_mint: PubkeyBytes,
-
-    pub token_a_decimals: u8,
-    pub token_b_decimals: u8,
-
-    pub token_a_vault: PubkeyBytes,
-    pub token_b_vault: PubkeyBytes,
+    pub token_a: PoolToken,
+    pub token_b: PoolToken,
 }
 
 /// CPMM (Raydium V4, Orca Legacy)
@@ -80,27 +109,21 @@ pub struct StableSwapState {
 /// CLMM (Whirlpool, Raydium CLMM)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ClmmState {
-    pub liquidity: u128,
+    pub liquidity: Option<u128>,
 
-    pub sqrt_price_x64: u128,
+    pub sqrt_price_x64: Option<u128>,
 
-    pub current_tick_index: i32,
+    pub current_tick_index: Option<i32>,
 
     pub tick_spacing: u16,
-
-    /// Tick array accounts
-    pub tick_array_pubkeys: Vec<PubkeyBytes>,
 }
 
 /// DLMM (Meteora)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DlmmState {
-    pub active_bin_id: i32,
+    pub active_bin_id: Option<i32>,
 
     pub bin_step: u16,
-
-    /// Bin array accounts
-    pub bin_array_pubkeys: Vec<PubkeyBytes>,
 }
 
 /// Orderbook (Phoenix/OpenBook)
@@ -131,7 +154,9 @@ pub struct Pool {
     /// Protocol-native fee representation.
     pub fee_rate: u32,
 
-    pub last_updated_slot: u64,
+    pub tvl: Option<f64>,
+
+    pub last_updated_slot: Option<u64>,
 }
 
 /// Optional metrics cache.
@@ -154,15 +179,17 @@ impl Pool {
 
     #[inline]
     pub fn is_stale(&self, current_slot: u64, max_slot_lag: u64) -> bool {
-        current_slot.saturating_sub(self.last_updated_slot) > max_slot_lag
+        self.last_updated_slot
+            .map(|last_updated_slot| current_slot.saturating_sub(last_updated_slot) > max_slot_lag)
+            .unwrap_or(true)
     }
 
     #[inline]
-    pub fn get_output_mint(&self, input_mint: &PubkeyBytes) -> Option<PubkeyBytes> {
-        if self.metadata.token_a_mint == *input_mint {
-            Some(self.metadata.token_b_mint)
-        } else if self.metadata.token_b_mint == *input_mint {
-            Some(self.metadata.token_a_mint)
+    pub fn get_output_token(&self, input_mint: &PubkeyBytes) -> Option<PubkeyBytes> {
+        if self.metadata.token_a.mint == *input_mint {
+            Some(self.metadata.token_b.mint)
+        } else if self.metadata.token_b.mint == *input_mint {
+            Some(self.metadata.token_a.mint)
         } else {
             None
         }
@@ -170,15 +197,15 @@ impl Pool {
 
     #[inline]
     pub fn is_input_token_a(&self, input_mint: &PubkeyBytes) -> bool {
-        self.metadata.token_a_mint == *input_mint
+        self.metadata.token_a.mint == *input_mint
     }
 
     #[inline]
-    pub fn canonical_pair_key(&self) -> (PubkeyBytes, PubkeyBytes) {
-        if self.metadata.token_a_mint < self.metadata.token_b_mint {
-            (self.metadata.token_a_mint, self.metadata.token_b_mint)
+    pub fn canonical_mint_order(&self) -> (PubkeyBytes, PubkeyBytes) {
+        if self.metadata.token_a.mint < self.metadata.token_b.mint {
+            (self.metadata.token_a.mint, self.metadata.token_b.mint)
         } else {
-            (self.metadata.token_b_mint, self.metadata.token_a_mint)
+            (self.metadata.token_b.mint, self.metadata.token_a.mint)
         }
     }
 

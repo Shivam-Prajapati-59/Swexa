@@ -1,6 +1,7 @@
 use crate::adapters::DexAdapter;
 use crate::models::pool::{
-    DexProtocol, DlmmState, Pool, PoolData, PoolId, PoolMetadata, PoolStatus, PoolType, PubkeyBytes,
+    DexProtocol, DlmmState, Pool, PoolData, PoolId, PoolMetadata, PoolStatus, PoolToken, PoolType,
+    PubkeyBytes,
 };
 use anyhow::{Context, Result};
 use reqwest::Client;
@@ -62,7 +63,9 @@ struct MeteoraPoolItem {
 struct MeteoraTokenInfo {
     address: String,
     decimals: u32,
-    #[allow(dead_code)]
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
     symbol: String,
 }
 
@@ -88,7 +91,7 @@ impl MeteoraAdapter {
 
     fn parse_pubkey(address: &str) -> Result<PubkeyBytes> {
         let pubkey = Pubkey::from_str(address).context("Invalid pubkey string")?;
-        Ok(pubkey.to_bytes())
+        Ok(PubkeyBytes(pubkey.to_bytes()))
     }
 
     /// Fetches a single page from the Meteora API with retry + timeout.
@@ -149,7 +152,7 @@ impl DexAdapter for MeteoraAdapter {
         &self,
         client: &Client,
         next_id: &mut PoolId,
-        current_slot: u64,
+        current_slot: Option<u64>,
     ) -> Result<Vec<Pool>> {
         let mut all_pools = Vec::new();
         let mut current_page = 1u32;
@@ -251,27 +254,34 @@ impl DexAdapter for MeteoraAdapter {
                     protocol: DexProtocol::Meteora,
                     pool_type: PoolType::Dlmm,
                     status: PoolStatus::Active,
-                    token_a_mint,
-                    token_b_mint,
-                    token_a_decimals: item.token_x.decimals as u8,
-                    token_b_decimals: item.token_y.decimals as u8,
-                    token_a_vault,
-                    token_b_vault,
+                    token_a: PoolToken {
+                        mint: token_a_mint,
+                        name: item.token_x.name.clone(),
+                        symbol: item.token_x.symbol.clone(),
+                        decimals: item.token_x.decimals as u8,
+                        vault: Some(token_a_vault),
+                    },
+                    token_b: PoolToken {
+                        mint: token_b_mint,
+                        name: item.token_y.name.clone(),
+                        symbol: item.token_y.symbol.clone(),
+                        decimals: item.token_y.decimals as u8,
+                        vault: Some(token_b_vault),
+                    },
                 };
 
                 // DLMM state — active_bin_id is not available from this endpoint.
                 // Must be hydrated via RPC before quoting, same pattern as Raydium CLMM.
                 let dlmm_state = DlmmState {
-                    active_bin_id: 0,
+                    active_bin_id: None,
                     bin_step: item.pool_config.bin_step as u16,
-                    // Todo: Bin arrays fetched on-demand at quote time
-                    bin_array_pubkeys: vec![],
                 };
 
                 all_pools.push(Pool {
                     metadata,
                     data: PoolData::Dlmm(dlmm_state),
                     fee_rate,
+                    tvl: Some(item.tvl),
                     last_updated_slot: current_slot,
                 });
 

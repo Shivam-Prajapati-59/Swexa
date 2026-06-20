@@ -1,7 +1,7 @@
 use crate::adapters::DexAdapter;
 use crate::models::pool::{
-    ClmmState, CpmmState, DexProtocol, Pool, PoolData, PoolId, PoolMetadata, PoolStatus, PoolType,
-    PubkeyBytes,
+    ClmmState, CpmmState, DexProtocol, Pool, PoolData, PoolId, PoolMetadata, PoolStatus, PoolToken,
+    PoolType, PubkeyBytes,
 };
 use anyhow::{Context, Result};
 use reqwest::Client;
@@ -69,12 +69,16 @@ struct RaydiumPoolItem {
 struct RaydiumMintInfo {
     address: String,
     decimals: u8,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    symbol: String,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RaydiumClmmConfig {
-    tick_spacing: u16,
+    tick_spacing: Option<u16>,
     #[allow(dead_code)]
     trade_fee_rate: u32,
 }
@@ -92,7 +96,7 @@ impl RaydiumAdapter {
 
     fn parse_pubkey(address: &str) -> Result<PubkeyBytes> {
         let pubkey = Pubkey::from_str(address).context("Invalid pubkey string")?;
-        Ok(pubkey.to_bytes())
+        Ok(PubkeyBytes(pubkey.to_bytes()))
     }
 
     /// Converts the human-readable amount back to raw lamports using string
@@ -178,7 +182,7 @@ impl DexAdapter for RaydiumAdapter {
         &self,
         client: &Client,
         next_id: &mut PoolId,
-        current_slot: u64,
+        current_slot: Option<u64>,
     ) -> Result<Vec<Pool>> {
         let mut all_pools = Vec::new();
         let mut cursor: Option<String> = None;
@@ -227,12 +231,6 @@ impl DexAdapter for RaydiumAdapter {
                     }
                 };
 
-                // Raydium CPMM vaults are standard token accounts created at launch.
-                // They are NOT PDAs. You MUST fetch the pool state via RPC to resolve these.
-                // We leave them empty here to be hydrated by the execution engine later.
-                let token_a_vault = [0u8; 32];
-                let token_b_vault = [0u8; 32];
-
                 // FIX #6: Use .round() to prevent truncation (2499.999 → 2500, not 2499)
                 let fee_rate = (item.fee_rate * 1_000_000.0).round() as u32;
 
@@ -273,7 +271,7 @@ impl DexAdapter for RaydiumAdapter {
                         }
 
                         (
-                            PoolType::Cpmm,
+                            PoolType::AMM,
                             PoolData::Cpmm(CpmmState {
                                 reserve_a,
                                 reserve_b,
@@ -300,15 +298,24 @@ impl DexAdapter for RaydiumAdapter {
                             }
                         };
 
+                        let tick_spacing = match config.tick_spacing {
+                            Some(tick_spacing) => tick_spacing,
+                            None => {
+                                log::warn!(
+                                    "RaydiumAdapter: CLMM pool {} missing tick spacing, skipping",
+                                    item.id
+                                );
+                                continue;
+                            }
+                        };
+
                         (
                             PoolType::Clmm,
                             PoolData::Clmm(ClmmState {
-                                liquidity: 0,
-                                sqrt_price_x64: 0,
-                                current_tick_index: 0,
-                                tick_spacing: config.tick_spacing,
-                                // Todo: Raydium CLMM tick arrays fetched on-demand at quote time
-                                tick_array_pubkeys: vec![],
+                                liquidity: None,
+                                sqrt_price_x64: None,
+                                current_tick_index: None,
+                                tick_spacing,
                             }),
                         )
                     }
@@ -329,18 +336,27 @@ impl DexAdapter for RaydiumAdapter {
                     protocol: DexProtocol::Raydium,
                     pool_type,
                     status: PoolStatus::Active,
-                    token_a_mint,
-                    token_b_mint,
-                    token_a_decimals: item.mint_a.decimals,
-                    token_b_decimals: item.mint_b.decimals,
-                    token_a_vault,
-                    token_b_vault,
+                    token_a: PoolToken {
+                        mint: token_a_mint,
+                        name: item.mint_a.name,
+                        symbol: item.mint_a.symbol,
+                        decimals: item.mint_a.decimals,
+                        vault: None, // Raydium V3 API doesn't expose CPMM vaults
+                    },
+                    token_b: PoolToken {
+                        mint: token_b_mint,
+                        name: item.mint_b.name,
+                        symbol: item.mint_b.symbol,
+                        decimals: item.mint_b.decimals,
+                        vault: None,
+                    },
                 };
 
                 all_pools.push(Pool {
                     metadata,
                     data: pool_data,
                     fee_rate,
+                    tvl: Some(item.tvl),
                     last_updated_slot: current_slot,
                 });
 
