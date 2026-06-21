@@ -1,9 +1,10 @@
 pub mod adapters;
 pub mod api;
+pub mod graph;
 pub mod models;
 pub mod types;
 
-use axum::{Router, routing::get};
+use axum::Router;
 use types::AppState;
 
 #[tokio::main]
@@ -11,7 +12,7 @@ async fn main() {
     let app_state = AppState::new().await;
 
     let app = Router::new()
-        .route("/pools", get(api::get_all_pools))
+        .nest("/api", api::api_routes())
         .with_state(app_state);
 
     println!("Server running on http://127.0.0.1:8000");
