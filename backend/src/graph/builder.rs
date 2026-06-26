@@ -1,3 +1,4 @@
+use crate::models::graph::PoolEdge;
 use crate::models::pool::{Pool, PoolId, PoolStatus, PubkeyBytes};
 use petgraph::algo::all_simple_paths;
 use petgraph::graph::{DiGraph, NodeIndex};
@@ -17,6 +18,11 @@ const MAX_HOPS_CEILING: usize = 4;
 /// Default route limit if caller doesn't specify one.
 const DEFAULT_MAX_ROUTES: usize = 200;
 
+/// Maximum number of pools to keep per token pair (sorted by TVL desc).
+/// Keeps the graph lean — more than 5 parallel pools between the same
+/// pair rarely adds routing value.
+const TOP_N_PER_PAIR: usize = 5;
+
 // ---------------------------------------------------------------------------
 // Route output type
 // ---------------------------------------------------------------------------
@@ -28,6 +34,8 @@ const DEFAULT_MAX_ROUTES: usize = 200;
 #[derive(Debug, Clone, Serialize)]
 pub struct RouteCandidate {
     pub steps: Vec<RouteStep>,
+    /// Sum of heuristic costs across all steps (lower = better)
+    pub total_cost: f64,
 }
 
 /// One hop in a multi-hop swap route.
@@ -45,10 +53,13 @@ pub struct RouteStep {
 // Graph types
 // ---------------------------------------------------------------------------
 
-/// A directed graph representing the DEX ecosystem.
-/// - Nodes are Token Mints (`PubkeyBytes`)
-/// - Edges are Liquidity Pools (`PoolId`)
-pub type DexGraph = DiGraph<PubkeyBytes, PoolId>;
+/// A directed multigraph representing the DEX ecosystem.
+/// - **Nodes**: Token Mints (`PubkeyBytes`)
+/// - **Edges**: Liquidity Pools (`PoolEdge`) with rich metadata
+///
+/// The `PoolEdge` on each edge carries fee_rate, tvl, protocol, pool_type,
+/// and decimals — enough for heuristic scoring without external lookups.
+pub type DexGraph = DiGraph<PubkeyBytes, PoolEdge>;
 
 /// The zero pubkey — used to filter broken/uninitialized pool mints.
 const ZERO_MINT: PubkeyBytes = PubkeyBytes([0u8; 32]);
@@ -84,51 +95,99 @@ impl GraphBuilder {
 
     /// Populates the graph from discovered pools.
     ///
-    /// Filters out:
-    /// - Pools with `status != Active`
-    /// - Pools with TVL below `min_tvl` (NaN-safe: NaN TVL is treated as 0.0)
-    /// - Pools with zero-mint (uninitialized) token addresses
-    /// - Duplicate edges from repeated calls
+    /// Applies a multi-stage pruning pipeline:
+    /// 1. **Status filter**: Only `Active` pools pass
+    /// 2. **TVL threshold**: Pools below `min_tvl` are dropped (NaN-safe)
+    /// 3. **Zero-mint filter**: Uninitialized or self-referencing pools are dropped
+    /// 4. **Top-N per pair**: For each (mintA, mintB), only the top 5 pools by TVL
+    ///    are inserted (the rest are discarded)
+    /// 5. **Deduplication**: Same (src, dst, pool_id) edge is never added twice
     pub fn build_from_pools(&mut self, pools: &[Pool], min_tvl: f64) {
         // Clamp min_tvl: if caller passes NaN, treat it as 0.0 (accept everything).
         let safe_min_tvl = if min_tvl.is_finite() { min_tvl } else { 0.0 };
 
-        for pool in pools {
-            // Skip inactive pools
-            if pool.metadata.status != PoolStatus::Active {
-                continue;
-            }
+        // ── Stage 1-3: Filter pools ─────────────────────────────────────
+        let mut valid_pools: Vec<&Pool> = pools
+            .iter()
+            .filter(|pool| {
+                // Skip inactive pools
+                if pool.metadata.status != PoolStatus::Active {
+                    return false;
+                }
 
-            // NaN-safe TVL check
-            let tvl = pool.tvl.unwrap_or(0.0);
-            let tvl = if tvl.is_finite() { tvl } else { 0.0 };
-            if tvl < safe_min_tvl {
-                continue;
-            }
+                // NaN-safe TVL check
+                let tvl = pool.tvl.unwrap_or(0.0);
+                let tvl = if tvl.is_finite() { tvl } else { 0.0 };
+                if tvl < safe_min_tvl {
+                    return false;
+                }
 
+                let mint_a = pool.metadata.token_a.mint;
+                let mint_b = pool.metadata.token_b.mint;
+
+                // Skip pools with zero/uninitialized mints
+                if mint_a == ZERO_MINT || mint_b == ZERO_MINT {
+                    return false;
+                }
+
+                // Skip self-referencing pools (same token on both sides)
+                if mint_a == mint_b {
+                    return false;
+                }
+
+                true
+            })
+            .collect();
+
+        // ── Stage 4: Top-N per pair pruning ─────────────────────────────
+        // Sort all valid pools by TVL descending so that when we insert,
+        // the highest-TVL pools are processed first.
+        valid_pools.sort_by(|a, b| {
+            let tvl_a = a.tvl.unwrap_or(0.0);
+            let tvl_b = b.tvl.unwrap_or(0.0);
+            tvl_b.partial_cmp(&tvl_a).unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Track how many pools we've inserted per canonical pair
+        let mut pair_counts: HashMap<(PubkeyBytes, PubkeyBytes), usize> = HashMap::new();
+
+        for pool in valid_pools {
             let mint_a = pool.metadata.token_a.mint;
             let mint_b = pool.metadata.token_b.mint;
 
-            // Skip pools with zero/uninitialized mints
-            if mint_a == ZERO_MINT || mint_b == ZERO_MINT {
-                continue;
-            }
+            // Canonical pair key (sorted order) to treat A-B and B-A as the same pair
+            let pair_key = if mint_a < mint_b {
+                (mint_a, mint_b)
+            } else {
+                (mint_b, mint_a)
+            };
 
-            // Skip self-referencing pools (same token on both sides)
-            if mint_a == mint_b {
-                continue;
+            // Check top-N limit for this pair
+            let count = pair_counts.entry(pair_key).or_insert(0);
+            if *count >= TOP_N_PER_PAIR {
+                continue; // Already have enough pools for this pair
             }
 
             let node_a = self.get_or_add_node(mint_a);
             let node_b = self.get_or_add_node(mint_b);
             let pool_id = pool.metadata.id;
 
-            // Deduplicate: only add edge if this exact (src, dst, pool_id) hasn't been seen
+            // Build the rich edge weight
+            let edge = PoolEdge::from_pool(pool);
+
+            // ── Stage 5: Deduplication ──────────────────────────────────
+            let mut inserted = false;
             if self.inserted_edges.insert((node_a, node_b, pool_id)) {
-                self.graph.add_edge(node_a, node_b, pool_id);
+                self.graph.add_edge(node_a, node_b, edge.clone());
+                inserted = true;
             }
             if self.inserted_edges.insert((node_b, node_a, pool_id)) {
-                self.graph.add_edge(node_b, node_a, pool_id);
+                self.graph.add_edge(node_b, node_a, edge);
+                inserted = true;
+            }
+
+            if inserted {
+                *count += 1;
             }
         }
     }
@@ -140,11 +199,8 @@ impl GraphBuilder {
     /// - `max_routes`: Maximum number of **distinct** `RouteCandidate`s to return.
     ///   0 means use `DEFAULT_MAX_ROUTES`.
     ///
-    /// # How petgraph's `all_simple_paths` works
-    /// The function takes `min_intermediate_nodes` and `max_intermediate_nodes` — these
-    /// count **intermediate** nodes (excluding start and end), NOT edges.
-    /// For `max_hops` edges, we need `max_hops - 1` intermediate nodes.
-    /// Example: A→B→C is 2 hops (edges) and 1 intermediate node (B).
+    /// # Returns
+    /// Routes sorted by `total_cost` ascending (best routes first).
     pub fn find_all_routes(
         &self,
         input_mint: &PubkeyBytes,
@@ -182,45 +238,44 @@ impl GraphBuilder {
         let mut all_routes: Vec<RouteCandidate> = Vec::new();
 
         for node_path in node_paths {
-            // Early exit if we've already collected enough distinct routes
-            if all_routes.len() >= clamped_routes {
-                break;
-            }
-
-            let remaining = clamped_routes - all_routes.len();
-            let expanded = self.expand_node_path_to_routes(&node_path, remaining);
+            let expanded = self.expand_node_path_to_routes(&node_path);
 
             for candidate in expanded {
-                // Deduplicate: extract the pool_id sequence as a fingerprint
                 let fingerprint: Vec<PoolId> = candidate.steps.iter().map(|s| s.pool_id).collect();
                 if seen_routes.insert(fingerprint) {
                     all_routes.push(candidate);
-                    if all_routes.len() >= clamped_routes {
-                        break;
-                    }
                 }
             }
         }
 
         if all_routes.is_empty() {
-            None
-        } else {
-            Some(all_routes)
+            return None;
         }
+
+        // Sort by heuristic cost ascending (best routes first)
+        all_routes.sort_by(|a, b| {
+            a.total_cost
+                .partial_cmp(&b.total_cost)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+
+        // Truncate to the requested limit
+        all_routes.truncate(clamped_routes);
+
+        Some(all_routes)
     }
 
     /// Takes a node path like [SOL, RAY, USDC] and expands it into concrete
     /// `RouteCandidate`s by enumerating all pool (edge) combinations per hop.
     ///
-    /// Caps output at `limit` to prevent combinatorial explosion.
+    /// Each candidate is scored by summing `heuristic_cost()` across its edges.
     /// Deduplicates pool_ids per hop to avoid duplicate edges producing duplicate routes.
     fn expand_node_path_to_routes(
         &self,
         node_path: &[NodeIndex],
-        limit: usize,
     ) -> Vec<RouteCandidate> {
-        // Start with one empty route
-        let mut candidates: Vec<Vec<RouteStep>> = vec![vec![]];
+        // Each candidate is (steps, accumulated_cost)
+        let mut candidates: Vec<(Vec<RouteStep>, f64)> = vec![(vec![], 0.0)];
 
         for window in node_path.windows(2) {
             let u = window[0];
@@ -229,35 +284,29 @@ impl GraphBuilder {
             let input_mint = self.graph[u];
             let output_mint = self.graph[v];
 
-            // Collect UNIQUE pool IDs for this u→v edge
-            // This prevents duplicate edges (from graph construction) from
-            // producing duplicate route candidates.
+            // Collect UNIQUE edges for this u→v hop.
+            // Deduplicate by pool_id to prevent duplicate graph edges
+            // from producing duplicate route candidates.
             let mut seen_pool_ids = HashSet::new();
-            let pool_ids: Vec<PoolId> = self
+            let edges: Vec<(PoolId, f64)> = self
                 .graph
                 .edges(u)
                 .filter(|e| e.target() == v)
-                .map(|e| *e.weight())
-                .filter(|id| seen_pool_ids.insert(*id))
+                .filter(|e| seen_pool_ids.insert(e.weight().pool_id))
+                .map(|e| (e.weight().pool_id, e.weight().heuristic_cost()))
                 .collect();
 
             // Cartesian product: each existing candidate × each pool at this hop
             let mut next_candidates = Vec::new();
-            for candidate in &candidates {
-                for &pool_id in &pool_ids {
-                    if next_candidates.len() >= limit {
-                        break;
-                    }
-                    let mut new_candidate = candidate.clone();
-                    new_candidate.push(RouteStep {
+            for (candidate, cost) in &candidates {
+                for &(pool_id, edge_cost) in &edges {
+                    let mut new_steps = candidate.clone();
+                    new_steps.push(RouteStep {
                         pool_id,
                         input_mint,
                         output_mint,
                     });
-                    next_candidates.push(new_candidate);
-                }
-                if next_candidates.len() >= limit {
-                    break;
+                    next_candidates.push((new_steps, cost + edge_cost));
                 }
             }
             candidates = next_candidates;
@@ -265,7 +314,7 @@ impl GraphBuilder {
 
         candidates
             .into_iter()
-            .map(|steps| RouteCandidate { steps })
+            .map(|(steps, total_cost)| RouteCandidate { steps, total_cost })
             .collect()
     }
 
@@ -277,5 +326,13 @@ impl GraphBuilder {
     /// Returns the number of directed edges (pool connections) in the graph.
     pub fn edge_count(&self) -> usize {
         self.graph.edge_count()
+    }
+
+    /// Returns a reference to a `PoolEdge` by pool_id, searching the graph edges.
+    /// Used by the API handler to read pool metadata from the graph directly.
+    pub fn get_pool_edge(&self, pool_id: PoolId) -> Option<&PoolEdge> {
+        self.graph
+            .edge_weights()
+            .find(|edge| edge.pool_id == pool_id)
     }
 }
