@@ -32,21 +32,21 @@ pub async fn fetch_all_pools(client: &Client, current_slot: Option<u64>) -> Resu
     let mut next_id = 0;
     let mut all_pools = Vec::new();
 
-    let raydium = RaydiumAdapter::new();
+    let raydium = RaydiumAdapter;
     let mut raydium_pools = raydium
         .fetch_pools(client, &mut next_id, current_slot)
         .await
         .context("failed to fetch Raydium pools")?;
     all_pools.append(&mut raydium_pools);
 
-    let meteora = MeteoraAdapter::new();
+    let meteora = MeteoraAdapter;
     let mut meteora_pools = meteora
         .fetch_pools(client, &mut next_id, current_slot)
         .await
         .context("failed to fetch Meteora pools")?;
     all_pools.append(&mut meteora_pools);
 
-    let whirlpool = WhirlpoolAdapter::new();
+    let whirlpool = WhirlpoolAdapter;
     let mut whirlpool_pools = whirlpool
         .fetch_pools(client, &mut next_id, current_slot)
         .await

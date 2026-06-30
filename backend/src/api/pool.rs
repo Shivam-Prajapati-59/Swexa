@@ -1,6 +1,7 @@
 use crate::{adapters, models::pool::Pool, types::AppState};
 use axum::{extract::State, http::StatusCode, response::Json};
 use reqwest::Client;
+use std::sync::atomic::Ordering;
 
 pub async fn get_all_pools(
     State(state): State<AppState>,
@@ -17,6 +18,8 @@ pub async fn get_all_pools(
 
     let mut cached_pools = state.pools.write().await;
     *cached_pools = pools.clone();
+    // Invalidate graph cache so it gets rebuilt on next request
+    state.pool_generation.fetch_add(1, Ordering::Release);
 
     Ok(Json(pools))
 }

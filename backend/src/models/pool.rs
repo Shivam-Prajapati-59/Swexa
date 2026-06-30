@@ -213,4 +213,262 @@ impl Pool {
     pub fn pool_id(&self) -> PoolId {
         self.metadata.id
     }
+
+    /// Simulates an exact swap through this pool using pool-type-specific math.
+    ///
+    /// Returns the estimated output amount in raw atomic units after deducting fees and
+    /// accounting for price impact. Uses the exact invariant formula for each pool type:
+    /// - CPMM: `dy = y * dx' / (x + dx')` (constant product x*y=k)
+    /// - StableSwap: Newton's method on the Curve stableswap invariant
+    /// - CLMM: Linear spot-price approximation (no tick-crossing simulation yet)
+    /// - Others: `None`
+    pub fn simulate_swap(&self, input_mint: &PubkeyBytes, amount_in: u64) -> Option<u64> {
+        if self.metadata.token_a.mint != *input_mint
+            && self.metadata.token_b.mint != *input_mint
+        {
+            return None;
+        }
+        if amount_in == 0 {
+            return None;
+        }
+
+        let is_a_in = self.is_input_token_a(input_mint);
+        let amount_in_f = amount_in as f64;
+        let fee_fraction = self.fee_rate as f64 / 1_000_000.0;
+        let amount_after_fee = amount_in_f * (1.0 - fee_fraction);
+
+        if amount_after_fee <= 0.0 {
+            return None;
+        }
+
+        match &self.data {
+            PoolData::Cpmm(state) => {
+                let (res_in, res_out) = if is_a_in {
+                    (state.reserve_a as f64, state.reserve_b as f64)
+                } else {
+                    (state.reserve_b as f64, state.reserve_a as f64)
+                };
+
+                if res_in <= 0.0 || res_out <= 0.0 {
+                    return None;
+                }
+
+                // Exact CPMM: dy = y * dx' / (x + dx')
+                let dy = res_out * amount_after_fee / (res_in + amount_after_fee);
+
+                if dy.is_finite() && dy > 0.0 {
+                    Some(dy as u64)
+                } else {
+                    None
+                }
+            }
+            PoolData::Stable(state) => {
+                let (res_in, res_out, mult_in, mult_out) = if is_a_in {
+                    (state.reserve_a, state.reserve_b, state.token_a_multiplier, state.token_b_multiplier)
+                } else {
+                    (state.reserve_b, state.reserve_a, state.token_b_multiplier, state.token_a_multiplier)
+                };
+
+                let x = (res_in as f64) * (mult_in as f64);
+                let y = (res_out as f64) * (mult_out as f64);
+
+                if x <= 0.0 || y <= 0.0 {
+                    return None;
+                }
+
+                let a = state.amp_factor as f64;
+
+                // Compute D via Newton: A * 4 * (x + y) + D = A * 4 * D + D^3 / (4 * x * y)
+                let mut d = x + y;
+                for _ in 0..64 {
+                    let d2 = d * d;
+                    let d3 = d2 * d;
+                    let xy = x * y;
+                    let num = 16.0 * a * xy * (x + y) + 2.0 * d3;
+                    let den = 16.0 * a * xy + 3.0 * d2;
+                    if den <= 0.0 || !den.is_finite() {
+                        break;
+                    }
+                    let d_next = num / den;
+                    if (d_next - d).abs() <= 1.0 {
+                        d = d_next;
+                        break;
+                    }
+                    d = d_next;
+                }
+
+                if d <= 0.0 || !d.is_finite() {
+                    return None;
+                }
+
+                // Apply fee to normalized input
+                let dx_norm = amount_after_fee * (mult_in as f64);
+                let x_new = x + dx_norm;
+
+                // Solve for y_new: f(y) = D^3/(4*x*y) + 4A*(x+y-D) - D = 0
+                let mut y_new = y;
+                for _ in 0..64 {
+                    let d3 = d * d * d;
+                    let y2 = y_new * y_new;
+                    let four_xy = 4.0 * x_new * y_new;
+
+                    if y2 <= 0.0 || four_xy <= 0.0 {
+                        break;
+                    }
+
+                    let f_val = d3 / four_xy + 4.0 * a * (x_new + y_new - d) - d;
+                    let f_prime = -d3 / (4.0 * x_new * y2) + 4.0 * a;
+
+                    if f_prime.abs() <= 1e-18 {
+                        break;
+                    }
+
+                    let y_next = y_new - f_val / f_prime;
+
+                    if (y_next - y_new).abs() <= 1.0 {
+                        y_new = y_next;
+                        break;
+                    }
+                    y_new = y_next;
+                }
+
+                if y_new <= 0.0 || y_new >= y || !y_new.is_finite() {
+                    return None;
+                }
+
+                let dy_norm = y - y_new;
+                let dy = dy_norm / (mult_out as f64);
+
+                if dy.is_finite() && dy > 0.0 {
+                    Some(dy as u64)
+                } else {
+                    None
+                }
+            }
+            PoolData::Clmm(_) | PoolData::Dlmm(_) | PoolData::Orderbook(_) => {
+                // Fall back to linear spot-price approximation for complex pool types
+                // until on-chain state hydration enables exact simulation.
+                self.spot_price(input_mint).map(|spot| {
+                    (amount_after_fee * spot) as u64
+                })
+            }
+        }
+    }
+
+    /// Derives the current raw spot price of the output token in terms of the input token.
+    /// Price = amount of raw output token received per 1 raw unit of input token (before fees).
+    /// Returns `None` if `input_mint` does not match either token in this pool.
+    pub fn spot_price(&self, input_mint: &PubkeyBytes) -> Option<f64> {
+        // Reject mints that don't belong to this pool
+        if self.metadata.token_a.mint != *input_mint
+            && self.metadata.token_b.mint != *input_mint
+        {
+            return None;
+        }
+
+        let is_a_in = self.is_input_token_a(input_mint);
+
+        match &self.data {
+            PoolData::Cpmm(state) => {
+                let (res_in, res_out) = if is_a_in {
+                    (state.reserve_a as f64, state.reserve_b as f64)
+                } else {
+                    (state.reserve_b as f64, state.reserve_a as f64)
+                };
+                if res_in > 0.0 {
+                    Some(res_out / res_in)
+                } else {
+                    None
+                }
+            }
+            PoolData::Clmm(state) => {
+                // CLMM sqrt_price_x64 is (sqrt(P) * 2^64). Price P = Y/X (Token B per Token A)
+                if let Some(sqrt_price) = state.sqrt_price_x64 {
+                    let price = (sqrt_price as f64 / (1u128 << 64) as f64).powi(2);
+                    if is_a_in {
+                        Some(price)
+                    } else if price > 0.0 {
+                        Some(1.0 / price)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            PoolData::Dlmm(state) => {
+                // DLMM price = (1 + bin_step/10000) ^ active_bin_id
+                if let Some(bin_id) = state.active_bin_id {
+                    let base = 1.0 + (state.bin_step as f64 / 10_000.0);
+                    let price = base.powf(bin_id as f64);
+                    if is_a_in {
+                        Some(price)
+                    } else if price > 0.0 {
+                        Some(1.0 / price)
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                }
+            }
+            PoolData::Stable(state) => {
+                // Proper stableswap spot price using the invariant:
+                // A * 4 * (X + Y) + D = A * 4 * D + D^3 / (4 * X * Y)
+                // where X, Y are normalized reserves (raw * multiplier).
+                let (res_in, res_out, mult_in, mult_out) = if is_a_in {
+                    (state.reserve_a, state.reserve_b, state.token_a_multiplier, state.token_b_multiplier)
+                } else {
+                    (state.reserve_b, state.reserve_a, state.token_b_multiplier, state.token_a_multiplier)
+                };
+
+                let x = (res_in as f64) * (mult_in as f64);
+                let y = (res_out as f64) * (mult_out as f64);
+
+                if x <= 0.0 || y <= 0.0 {
+                    return None;
+                }
+
+                let a = state.amp_factor as f64;
+
+                // Solve for D (invariant) via Newton's method
+                // D_next = (16*A*x*y*(x+y) + 2*D^3) / (16*A*x*y + 3*D^2)
+                let mut d = x + y;
+                for _ in 0..64 {
+                    let d2 = d * d;
+                    let d3 = d2 * d;
+                    let xy = x * y;
+                    let num = 16.0 * a * xy * (x + y) + 2.0 * d3;
+                    let den = 16.0 * a * xy + 3.0 * d2;
+                    if den <= 0.0 || den.is_nan() {
+                        break;
+                    }
+                    let d_next = num / den;
+                    if (d_next - d).abs() <= 1.0 {
+                        d = d_next;
+                        break;
+                    }
+                    d = d_next;
+                }
+
+                if d <= 0.0 {
+                    return None;
+                }
+
+                // Spot price = -dY/dX = (4*A + D^3/(4*X^2*Y)) / (4*A + D^3/(4*X*Y^2))
+                // Both numerator and denominator are positive, so spot is positive.
+                let d3 = d * d * d;
+                let four_a = 4.0 * a;
+                let xy_term = d3 / (4.0 * x * y);
+                let spot = (four_a + xy_term / x) / (four_a + xy_term / y) * (mult_in as f64) / (mult_out as f64);
+
+                if spot.is_finite() && spot > 0.0 {
+                    Some(spot)
+                } else {
+                    None
+                }
+            }
+            PoolData::Orderbook(_) => None,
+        }
+    }
 }
