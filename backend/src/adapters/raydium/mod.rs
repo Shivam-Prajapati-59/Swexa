@@ -62,6 +62,7 @@ struct RaydiumPoolItem {
     price: f64,
     /// Only present on Concentrated pools
     #[serde(default)]
+    #[allow(dead_code)]
     config: Option<RaydiumClmmConfig>,
 }
 
@@ -78,6 +79,7 @@ struct RaydiumMintInfo {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RaydiumClmmConfig {
+    #[allow(dead_code)]
     tick_spacing: Option<u16>,
     #[allow(dead_code)]
     trade_fee_rate: u32,

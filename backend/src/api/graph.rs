@@ -51,8 +51,8 @@ pub async fn get_routes(
             .unwrap_or(std::cmp::Ordering::Equal)
     });
 
-    // Truncate to the requested limit
-    raw_routes.truncate(max_routes.max(200));
+    // Truncate to the requested limit.
+    raw_routes.truncate(max_routes);
 
     // Map the raw graph routes to our simplified API response
     let routes: Vec<GraphRoute> = raw_routes

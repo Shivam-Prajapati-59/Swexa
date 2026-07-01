@@ -8,10 +8,11 @@ use axum::response::Json;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
+/// GET /api/quote?inputMint=...&outputMint=...&amount=...
 /// GET /api/route?input_mint=...&output_mint=...&amount=...
 ///
 /// Returns the top 10 best routes for a given exact input amount,
-/// ranked by the estimated output amount (using protocol-specific lightweight estimators).
+/// ranked by the estimated output amount from the pool simulator.
 pub async fn get_route(
     State(state): State<AppState>,
     Query(params): Query<RouteQuery>,
@@ -26,40 +27,50 @@ pub async fn get_route(
         .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid output_mint: {e}")))?;
     let output_mint = PubkeyBytes(output_pubkey.to_bytes());
 
+    let amount = params
+        .amount
+        .parse::<u128>()
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("Invalid amount: {e}")))?;
+
     // Reject zero or missing amounts — would produce an empty 200 "no route found"
-    if params.amount == 0 {
+    if amount == 0 {
         return Err((
             StatusCode::BAD_REQUEST,
             "amount must be greater than 0".to_string(),
         ));
     }
 
-    // Read pools from shared state
-    let pools = state.pools.read().await;
-    if pools.is_empty() {
-        return Err((
-            StatusCode::SERVICE_UNAVAILABLE,
-            "Pool data not loaded yet. Call GET /api/pools first.".to_string(),
-        ));
-    }
+    // Read pools from shared state — clone and drop the lock immediately
+    // so the read guard doesn't block writers during expensive route enumeration.
+    let pools = {
+        let guard = state.pools.read().await;
+        if guard.is_empty() {
+            return Err((
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Pool data not loaded yet. Call GET /api/pools first.".to_string(),
+            ));
+        }
+        guard.clone()
+    };
 
     // Get or build cached graph
     let builder = state.get_or_build_graph().await;
 
-    // Find all raw routes — request up to 5k candidates so the optimizer has a
-    // diverse pool to rank. Hard-capped at 20k in find_all_routes for safety.
+    // Find all raw routes up to the graph-builder hard cap so quote ranking has
+    // the broadest candidate set before exact simulation.
     let raw_routes = builder
-        .find_all_routes(&input_mint, &output_mint, 4, 5000)
+        .find_all_routes(&input_mint, &output_mint, 4, 20_000)
         .unwrap_or_default();
 
-    // Pass 1: Lightweight Estimation & Ranking
-    // The optimizer will estimate the output for the exact amount and return the top 10
-    let top_candidates = optimizer::rank_candidates(raw_routes, params.amount, &pools, 10);
+    // Simulate exact input through each candidate and return the top 10.
+    let top_candidates = optimizer::rank_candidates(raw_routes, amount, &pools, 10);
 
     // Map to API response objects
     let best_routes: Vec<RankedRoute> = top_candidates
         .into_iter()
-        .filter_map(|(candidate, estimated_amount_out)| {
+        .filter_map(|simulated_route| {
+            let candidate = simulated_route.candidate;
+            let estimated_cost = candidate.total_cost;
             let steps: Option<Vec<GraphRouteStep>> = candidate
                 .steps
                 .into_iter()
@@ -81,13 +92,17 @@ pub async fn get_route(
             let steps = steps?;
 
             Some(RankedRoute {
-                amount_in: params.amount,
-                estimated_amount_out,
+                amount_in: amount,
+                estimated_amount_out: simulated_route.estimated_amount_out,
+                total_fees: simulated_route.total_fees,
+                max_price_impact_pct: simulated_route.max_price_impact_pct,
+                has_approximate_hops: simulated_route.has_approximate_hops,
                 route: GraphRoute {
                     hops: steps.len(),
-                    estimated_cost: candidate.total_cost,
+                    estimated_cost,
                     steps,
                 },
+                simulated_hops: simulated_route.hops,
             })
         })
         .collect();
@@ -95,7 +110,7 @@ pub async fn get_route(
     Ok(Json(RouteResponse {
         input_mint: params.input_mint,
         output_mint: params.output_mint,
-        amount_in: params.amount,
+        amount_in: amount,
         best_routes,
     }))
 }

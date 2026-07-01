@@ -11,7 +11,8 @@ pub fn api_routes() -> Router<AppState> {
         .route("/pools", get(pool::get_all_pools))
         // Graph / routing routes
         .route("/allroutes", get(graph::get_routes))
-        // Ranked routes (previously quote)
+        // Exact-input quote routes
+        .route("/quote", get(route::get_route))
         .route("/route", get(route::get_route))
     // Future routes go here:
     // .route("/tokens", get(token::list_tokens))

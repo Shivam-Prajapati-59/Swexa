@@ -116,6 +116,24 @@ pub struct GraphRoute {
     pub steps: Vec<GraphRouteStep>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct SimulatedHop {
+    pub pool_id: u32,
+    pub input_mint: PubkeyBytes,
+    pub output_mint: PubkeyBytes,
+    pub amount_in: u128,
+    pub amount_out: u128,
+    pub fee_amount: u128,
+    pub price_impact_pct: f64,
+    pub is_approximate: bool,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TokenAmount {
+    pub mint: PubkeyBytes,
+    pub amount: u128,
+}
+
 #[derive(Debug, Serialize)]
 pub struct RoutesResponse {
     pub input_mint: String,
@@ -126,22 +144,28 @@ pub struct RoutesResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct RouteQuery {
+    #[serde(alias = "inputMint")]
     pub input_mint: String,
+    #[serde(alias = "outputMint")]
     pub output_mint: String,
-    pub amount: u64,
+    pub amount: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RankedRoute {
-    pub amount_in: u64,
-    pub estimated_amount_out: u64,
+    pub amount_in: u128,
+    pub estimated_amount_out: u128,
+    pub total_fees: Vec<TokenAmount>,
+    pub max_price_impact_pct: f64,
+    pub has_approximate_hops: bool,
     pub route: GraphRoute,
+    pub simulated_hops: Vec<SimulatedHop>,
 }
 
 #[derive(Debug, Serialize)]
 pub struct RouteResponse {
     pub input_mint: String,
     pub output_mint: String,
-    pub amount_in: u64,
+    pub amount_in: u128,
     pub best_routes: Vec<RankedRoute>,
 }

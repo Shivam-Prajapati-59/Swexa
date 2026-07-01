@@ -163,7 +163,9 @@ impl GraphBuilder {
         valid_pools.sort_by(|a, b| {
             let tvl_a = a.tvl.unwrap_or(0.0);
             let tvl_b = b.tvl.unwrap_or(0.0);
-            tvl_b.partial_cmp(&tvl_a).unwrap_or(std::cmp::Ordering::Equal)
+            tvl_b
+                .partial_cmp(&tvl_a)
+                .unwrap_or(std::cmp::Ordering::Equal)
         });
 
         // Track how many pools we've inserted per canonical pair
@@ -347,9 +349,10 @@ impl GraphBuilder {
                     next_candidates.push((new_steps, cost + edge_cost));
                 }
             }
-            
+
             // Enforce top-K pruning bound during traversal
-            next_candidates.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+            next_candidates
+                .sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
             next_candidates.truncate(limit);
 
             candidates = next_candidates;
@@ -375,5 +378,222 @@ impl GraphBuilder {
     /// Used by the API handler to read pool metadata from the graph directly.
     pub fn get_pool_edge(&self, pool_id: PoolId) -> Option<&PoolEdge> {
         self.pool_edge_map.get(&pool_id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::pool::{
+        CpmmState, DexProtocol, PoolData, PoolMetadata, PoolToken, PoolType,
+    };
+
+    fn mint(byte: u8) -> PubkeyBytes {
+        PubkeyBytes([byte; 32])
+    }
+
+    fn pool(
+        id: PoolId,
+        token_a: PubkeyBytes,
+        token_b: PubkeyBytes,
+        reserve_a: u128,
+        reserve_b: u128,
+        tvl: Option<f64>,
+        status: PoolStatus,
+    ) -> Pool {
+        Pool {
+            metadata: PoolMetadata {
+                id,
+                pubkey: mint(id as u8 + 20),
+                protocol: DexProtocol::Raydium,
+                pool_type: PoolType::AMM,
+                status,
+                token_a: PoolToken {
+                    mint: token_a,
+                    name: "A".to_string(),
+                    symbol: "A".to_string(),
+                    decimals: 6,
+                    vault: None,
+                },
+                token_b: PoolToken {
+                    mint: token_b,
+                    name: "B".to_string(),
+                    symbol: "B".to_string(),
+                    decimals: 6,
+                    vault: None,
+                },
+            },
+            data: PoolData::Cpmm(CpmmState {
+                reserve_a,
+                reserve_b,
+            }),
+            fee_rate: 1_000,
+            tvl,
+            last_updated_slot: None,
+        }
+    }
+
+    #[test]
+    fn build_filters_invalid_pools_and_deduplicates_rebuilds() {
+        let token_a = mint(1);
+        let token_b = mint(2);
+        let pools = vec![
+            pool(
+                1,
+                token_a,
+                token_b,
+                1_000,
+                1_000,
+                Some(2_000.0),
+                PoolStatus::Active,
+            ),
+            pool(
+                2,
+                ZERO_MINT,
+                token_b,
+                1_000,
+                1_000,
+                Some(2_000.0),
+                PoolStatus::Active,
+            ),
+            pool(
+                3,
+                token_a,
+                token_a,
+                1_000,
+                1_000,
+                Some(2_000.0),
+                PoolStatus::Active,
+            ),
+            pool(
+                4,
+                token_a,
+                mint(3),
+                1_000,
+                1_000,
+                Some(100.0),
+                PoolStatus::Active,
+            ),
+            pool(
+                5,
+                token_a,
+                mint(4),
+                1_000,
+                1_000,
+                Some(2_000.0),
+                PoolStatus::Disabled,
+            ),
+        ];
+
+        let mut builder = GraphBuilder::new();
+        builder.build_from_pools(&pools, 1_000.0);
+        builder.build_from_pools(&pools, 1_000.0);
+
+        assert_eq!(builder.token_count(), 2);
+        assert_eq!(builder.edge_count(), 2);
+        assert!(builder.get_pool_edge(1).is_some());
+        assert!(builder.get_pool_edge(2).is_none());
+    }
+
+    #[test]
+    fn find_all_routes_preserves_step_direction() {
+        let token_a = mint(1);
+        let token_b = mint(2);
+        let token_c = mint(3);
+        let pools = vec![
+            pool(
+                1,
+                token_a,
+                token_b,
+                1_000,
+                1_000,
+                Some(2_000.0),
+                PoolStatus::Active,
+            ),
+            pool(
+                2,
+                token_b,
+                token_c,
+                1_000,
+                1_000,
+                Some(2_000.0),
+                PoolStatus::Active,
+            ),
+        ];
+        let mut builder = GraphBuilder::new();
+        builder.build_from_pools(&pools, 0.0);
+
+        let routes = builder.find_all_routes(&token_c, &token_a, 2, 10).unwrap();
+        let route = routes.iter().find(|route| route.steps.len() == 2).unwrap();
+
+        assert_eq!(route.steps[0].pool_id, 2);
+        assert_eq!(route.steps[0].input_mint, token_c);
+        assert_eq!(route.steps[0].output_mint, token_b);
+        assert_eq!(route.steps[1].pool_id, 1);
+        assert_eq!(route.steps[1].input_mint, token_b);
+        assert_eq!(route.steps[1].output_mint, token_a);
+    }
+
+    #[test]
+    fn route_limit_and_hop_limit_are_enforced() {
+        let token_a = mint(1);
+        let token_b = mint(2);
+        let token_c = mint(3);
+        let pools = vec![
+            pool(
+                1,
+                token_a,
+                token_b,
+                1_000,
+                1_000,
+                Some(2_000.0),
+                PoolStatus::Active,
+            ),
+            pool(
+                2,
+                token_b,
+                token_c,
+                1_000,
+                1_000,
+                Some(2_000.0),
+                PoolStatus::Active,
+            ),
+        ];
+        let mut builder = GraphBuilder::new();
+        builder.build_from_pools(&pools, 0.0);
+
+        assert!(builder.find_all_routes(&token_a, &token_c, 1, 10).is_none());
+        let routes = builder.find_all_routes(&token_a, &token_c, 2, 1).unwrap();
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].steps.len(), 2);
+    }
+
+    #[test]
+    fn top_n_per_pair_pruning_is_deterministic() {
+        let token_a = mint(1);
+        let token_b = mint(2);
+        let pools: Vec<Pool> = (0..8)
+            .map(|i| {
+                pool(
+                    i + 1,
+                    token_a,
+                    token_b,
+                    1_000,
+                    1_000,
+                    Some(1_000.0 + i as f64),
+                    PoolStatus::Active,
+                )
+            })
+            .collect();
+        let mut builder = GraphBuilder::new();
+        builder.build_from_pools(&pools, 0.0);
+
+        assert_eq!(builder.edge_count(), TOP_N_PER_PAIR * 2);
+        assert!(builder.get_pool_edge(8).is_some());
+        assert!(builder.get_pool_edge(7).is_some());
+        assert!(builder.get_pool_edge(6).is_some());
+        assert!(builder.get_pool_edge(5).is_some());
+        assert!(builder.get_pool_edge(4).is_some());
+        assert!(builder.get_pool_edge(3).is_none());
     }
 }
