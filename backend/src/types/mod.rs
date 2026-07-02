@@ -1,7 +1,7 @@
 use crate::graph::builder::GraphBuilder;
 use crate::models::pool::Pool;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
 
 type GraphCache = Option<(Arc<GraphBuilder>, u64)>;
@@ -31,7 +31,9 @@ impl AppState {
         // Fast path: cached graph is still fresh
         {
             let cache = self.graph_cache.read().await;
-            if let Some((ref builder, cached_gen)) = *cache && cached_gen == generation {
+            if let Some((ref builder, cached_gen)) = *cache
+                && cached_gen == generation
+            {
                 return builder.clone();
             }
         }
@@ -45,7 +47,9 @@ impl AppState {
         let current_gen = self.pool_generation.load(Ordering::Acquire);
 
         // Double-check to avoid redundant rebuilds from concurrent requests
-        if let Some((ref existing, cached_gen)) = *cache && cached_gen == current_gen {
+        if let Some((ref existing, cached_gen)) = *cache
+            && cached_gen == current_gen
+        {
             return existing.clone();
         }
 

@@ -1,10 +1,11 @@
-use crate::graph::optimizer;
 use crate::models::graph::{GraphRoute, GraphRouteStep, RankedRoute, RouteQuery, RouteResponse};
 use crate::models::pool::PubkeyBytes;
+use crate::services::quote_service;
 use crate::types::AppState;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
+use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
@@ -56,14 +57,22 @@ pub async fn get_route(
     // Get or build cached graph
     let builder = state.get_or_build_graph().await;
 
-    // Find all raw routes up to the graph-builder hard cap so quote ranking has
-    // the broadest candidate set before exact simulation.
-    let raw_routes = builder
-        .find_all_routes(&input_mint, &output_mint, 4, 20_000)
-        .unwrap_or_default();
+    let rpc_url = std::env::var("SOLANA_RPC_URL")
+        .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string());
+    let rpc = RpcClient::new(rpc_url);
 
-    // Simulate exact input through each candidate and return the top 10.
-    let top_candidates = optimizer::rank_candidates(raw_routes, amount, &pools, 10);
+    // First rank cheap candidates from cached metadata, then hydrate only those
+    // pools with RPC data and re-rank the final quote set.
+    let top_candidates = quote_service::rank_best_routes(
+        &builder,
+        &pools,
+        &input_mint,
+        &output_mint,
+        amount,
+        10,
+        Some(&rpc),
+    )
+    .await;
 
     // Map to API response objects
     let best_routes: Vec<RankedRoute> = top_candidates

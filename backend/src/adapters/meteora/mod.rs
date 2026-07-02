@@ -157,7 +157,7 @@ impl MeteoraAdapter {
         }
 
         let ppm = (base_fee_pct * 10_000.0).round();
-        if ppm < 0.0 || ppm > 1_000_000.0 {
+        if !(0.0..=1_000_000.0).contains(&ppm) {
             anyhow::bail!("Meteora base_fee_pct out of range (ppm={ppm}, max=1000000)");
         }
 
@@ -395,7 +395,7 @@ impl DexAdapter for MeteoraAdapter {
 
                 // Meteora exposes base_fee_pct as percent units: 0.04 means 0.04%,
                 // which is 400 ppm. dynamic_fee_pct can decay to near zero, so
-                // the base fee is the stable routing input for Phase 1 quotes.
+                // the base fee is the stable routing input for route ranking.
                 let fee_rate = match Self::base_fee_pct_to_ppm(item.pool_config.base_fee_pct) {
                     Ok(fee_rate) => fee_rate,
                     Err(e) => {
@@ -438,6 +438,7 @@ impl DexAdapter for MeteoraAdapter {
                         active_price: Some(active_price),
                         reserve_a: Some(reserve_a),
                         reserve_b: Some(reserve_b),
+                        bins: Vec::new(),
                     }),
                     fee_rate,
                     tvl: Some(item.tvl),

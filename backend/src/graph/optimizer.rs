@@ -20,8 +20,8 @@ pub struct SimulatedRoute {
 ///
 /// - CPMM pools use the constant-product invariant `dy = y * dx' / (x + dx')`
 /// - StableSwap pools use Newton's method on the Curve invariant
-/// - CLMM pools use a Q64.64 virtual reserve approximation
-/// - DLMM pools use a linear active-bin spot approximation
+/// - CLMM pools use hydrated tick traversal when available, otherwise Q64.64 virtual reserves
+/// - DLMM pools use hydrated bin traversal when available, otherwise active-bin spot math
 ///
 /// The simulation accounts for both protocol fees and price impact at every hop.
 pub fn rank_candidates(
@@ -88,7 +88,7 @@ pub fn rank_candidates(
                 .into_iter()
                 .map(|(mint, amount)| TokenAmount { mint, amount })
                 .collect();
-            total_fees.sort_by(|a, b| a.mint.cmp(&b.mint));
+            total_fees.sort_by_key(|fee| fee.mint);
 
             ranked.push(SimulatedRoute {
                 candidate,
@@ -101,7 +101,7 @@ pub fn rank_candidates(
         }
     }
 
-    ranked.sort_by(|a, b| b.estimated_amount_out.cmp(&a.estimated_amount_out));
+    ranked.sort_by_key(|route| std::cmp::Reverse(route.estimated_amount_out));
     ranked.truncate(top_k);
     ranked
 }

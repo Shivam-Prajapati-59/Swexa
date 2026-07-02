@@ -1,7 +1,7 @@
 use crate::models::sim_error::SimulationError;
 use crate::models::swap_math::{
-    SwapResult, simulate_clmm_virtual_reserves, simulate_cpmm, simulate_dlmm_spot,
-    simulate_stableswap,
+    DlmmQuoteParams, SwapResult, simulate_clmm_tick_traversal, simulate_clmm_virtual_reserves,
+    simulate_cpmm, simulate_dlmm_bin_traversal, simulate_dlmm_spot, simulate_stableswap,
 };
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use solana_sdk::pubkey::Pubkey;
@@ -121,6 +121,17 @@ pub struct ClmmState {
     pub current_tick_index: Option<i32>,
 
     pub tick_spacing: u16,
+
+    pub reserve_a: Option<u128>,
+    pub reserve_b: Option<u128>,
+
+    pub initialized_ticks: Vec<ClmmTick>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClmmTick {
+    pub index: i32,
+    pub liquidity_net: i128,
 }
 
 /// DLMM (Meteora)
@@ -134,6 +145,15 @@ pub struct DlmmState {
 
     pub reserve_a: Option<u128>,
     pub reserve_b: Option<u128>,
+
+    pub bins: Vec<DlmmBin>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct DlmmBin {
+    pub id: i32,
+    pub amount_x: u128,
+    pub amount_y: u128,
 }
 
 /// Orderbook (Phoenix/OpenBook)
@@ -227,8 +247,8 @@ impl Pool {
     /// Simulates an exact-input swap through this pool using pool-type-specific math.
     ///
     /// CPMM quotes are fixed-point exact. StableSwap uses a bounded f64 Newton
-    /// solver. CLMM/DLMM are explicit Phase 1 approximations until full bin/tick
-    /// liquidity hydration is available.
+    /// solver. CLMM/DLMM hydrate nearby on-chain tick/bin liquidity when it is
+    /// available and otherwise fall back to guarded spot approximations.
     pub fn simulate_swap(
         &self,
         input_mint: &PubkeyBytes,
@@ -285,13 +305,40 @@ impl Pool {
                 let sqrt_price_x64 = state
                     .sqrt_price_x64
                     .ok_or(SimulationError::InsufficientLiquidity)?;
-                simulate_clmm_virtual_reserves(
-                    amount_in,
-                    liquidity,
-                    sqrt_price_x64,
-                    is_a_in,
-                    self.fee_rate,
-                )
+                let reserve_out = if is_a_in {
+                    state.reserve_b
+                } else {
+                    state.reserve_a
+                };
+                let result = if state.initialized_ticks.is_empty() {
+                    simulate_clmm_virtual_reserves(
+                        amount_in,
+                        liquidity,
+                        sqrt_price_x64,
+                        is_a_in,
+                        self.fee_rate,
+                    )?
+                } else {
+                    let current_tick_index = state
+                        .current_tick_index
+                        .ok_or(SimulationError::InsufficientLiquidity)?;
+                    simulate_clmm_tick_traversal(
+                        amount_in,
+                        liquidity,
+                        sqrt_price_x64,
+                        current_tick_index,
+                        &state.initialized_ticks,
+                        is_a_in,
+                        self.fee_rate,
+                    )?
+                };
+
+                if let Some(reserve_out) = reserve_out
+                    && result.amount_out > reserve_out
+                {
+                    return Err(SimulationError::InsufficientLiquidity);
+                }
+                Ok(result)
             }
             PoolData::Dlmm(state) => {
                 if state.active_bin_id.is_none() && state.active_price.is_none() {
@@ -302,16 +349,22 @@ impl Pool {
                 } else {
                     (state.reserve_b, state.reserve_a)
                 };
-                simulate_dlmm_spot(
-                    amount_in,
-                    state.bin_step,
-                    state.active_bin_id,
-                    state.active_price,
+                let params = DlmmQuoteParams {
+                    bin_step: state.bin_step,
+                    active_bin_id: state.active_bin_id,
+                    active_price: state.active_price,
+                    bins: &state.bins,
                     reserve_in,
                     reserve_out,
-                    is_a_in,
-                    self.fee_rate,
-                )
+                    a_to_b: is_a_in,
+                    fee_rate_ppm: self.fee_rate,
+                };
+                let result = if state.bins.is_empty() {
+                    simulate_dlmm_spot(amount_in, &params)?
+                } else {
+                    simulate_dlmm_bin_traversal(amount_in, &params)?
+                };
+                Ok(result)
             }
             PoolData::Orderbook(_) => Err(SimulationError::UnsupportedPoolType),
         }
@@ -358,12 +411,13 @@ impl Pool {
             }
             PoolData::Dlmm(state) => {
                 if let Some(price) = state.active_price {
+                    if !price.is_finite() || price <= 0.0 {
+                        return None;
+                    }
                     if is_a_in {
                         Some(price)
-                    } else if price > 0.0 {
-                        Some(1.0 / price)
                     } else {
-                        None
+                        Some(1.0 / price)
                     }
                 } else if let Some(bin_id) = state.active_bin_id {
                     // DLMM price = (1 + bin_step/10000) ^ active_bin_id
@@ -449,5 +503,73 @@ impl Pool {
             }
             PoolData::Orderbook(_) => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn mint(byte: u8) -> PubkeyBytes {
+        PubkeyBytes([byte; 32])
+    }
+
+    fn clmm_pool(reserve_a: Option<u128>, reserve_b: Option<u128>) -> Pool {
+        let token_a = mint(1);
+        let token_b = mint(2);
+        Pool {
+            metadata: PoolMetadata {
+                id: 1,
+                pubkey: mint(9),
+                protocol: DexProtocol::Whirlpool,
+                pool_type: PoolType::Clmm,
+                status: PoolStatus::Active,
+                token_a: PoolToken {
+                    mint: token_a,
+                    name: "A".to_string(),
+                    symbol: "A".to_string(),
+                    decimals: 6,
+                    vault: Some(mint(3)),
+                },
+                token_b: PoolToken {
+                    mint: token_b,
+                    name: "B".to_string(),
+                    symbol: "B".to_string(),
+                    decimals: 6,
+                    vault: Some(mint(4)),
+                },
+            },
+            data: PoolData::Clmm(ClmmState {
+                liquidity: Some(1_000_000),
+                sqrt_price_x64: Some(1u128 << 64),
+                current_tick_index: Some(0),
+                tick_spacing: 1,
+                reserve_a,
+                reserve_b,
+                initialized_ticks: Vec::new(),
+            }),
+            fee_rate: 0,
+            tvl: Some(1_000.0),
+            last_updated_slot: Some(1),
+        }
+    }
+
+    #[test]
+    fn clmm_quote_respects_hydrated_output_reserve() {
+        let pool = clmm_pool(Some(1_000_000), Some(10));
+
+        assert_eq!(
+            pool.simulate_swap(&mint(1), 1_000).unwrap_err(),
+            SimulationError::InsufficientLiquidity
+        );
+    }
+
+    #[test]
+    fn clmm_quote_allows_missing_reserve_caps() {
+        let pool = clmm_pool(None, None);
+
+        let result = pool.simulate_swap(&mint(1), 1_000).unwrap();
+        assert!(result.amount_out > 0);
+        assert!(result.is_approximate);
     }
 }

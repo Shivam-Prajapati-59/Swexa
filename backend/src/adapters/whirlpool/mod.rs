@@ -1,4 +1,5 @@
 use crate::adapters::DexAdapter;
+use crate::hydration::pubkey_to_bytes;
 use crate::models::pool::{
     ClmmState, DexProtocol, Pool, PoolData, PoolId, PoolMetadata, PoolStatus, PoolToken, PoolType,
     PubkeyBytes,
@@ -136,17 +137,13 @@ impl DexAdapter for WhirlpoolAdapter {
                     continue;
                 }
             };
-
             if liquidity == 0 {
                 continue;
             }
 
-            // Storing the Fee rate raw
-            let fee_rate = orca_pool.fee_rate;
-
             let metadata = PoolMetadata {
                 id: *next_id,
-                pubkey: PubkeyBytes(pool_pubkey_raw.to_bytes()),
+                pubkey: pubkey_to_bytes(pool_pubkey_raw),
                 protocol: DexProtocol::Whirlpool,
                 pool_type: PoolType::Clmm,
                 status: PoolStatus::Active,
@@ -171,6 +168,9 @@ impl DexAdapter for WhirlpoolAdapter {
                 sqrt_price_x64: Some(sqrt_price_x64),
                 current_tick_index: Some(orca_pool.tick_current_index),
                 tick_spacing: orca_pool.tick_spacing,
+                reserve_a: None,
+                reserve_b: None,
+                initialized_ticks: Vec::new(),
             };
 
             let tvl_usdc = match f64::from_str(&orca_pool.tvl_usdc) {
@@ -188,7 +188,7 @@ impl DexAdapter for WhirlpoolAdapter {
             pools.push(Pool {
                 metadata,
                 data: PoolData::Clmm(clmm_state),
-                fee_rate,
+                fee_rate: orca_pool.fee_rate,
                 tvl: Some(tvl_usdc),
                 last_updated_slot: current_slot,
             });
