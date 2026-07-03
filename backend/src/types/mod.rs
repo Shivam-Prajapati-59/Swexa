@@ -1,5 +1,6 @@
 use crate::graph::builder::GraphBuilder;
 use crate::models::pool::Pool;
+use solana_client::nonblocking::rpc_client::RpcClient;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::RwLock;
@@ -9,6 +10,7 @@ type GraphCache = Option<(Arc<GraphBuilder>, u64)>;
 #[derive(Clone)]
 pub struct AppState {
     pub pools: Arc<RwLock<Vec<Pool>>>,
+    pub rpc: Arc<RpcClient>,
     /// Incremented every time pools are refreshed, invalidating the cached graph.
     pub pool_generation: Arc<AtomicU64>,
     /// Cached graph built from pools. Rebuilt lazily when generation changes.
@@ -19,6 +21,10 @@ impl AppState {
     pub async fn new() -> Self {
         Self {
             pools: Arc::new(RwLock::new(Vec::new())),
+            rpc: Arc::new(RpcClient::new(
+                std::env::var("SOLANA_RPC_URL")
+                    .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string()),
+            )),
             pool_generation: Arc::new(AtomicU64::new(0)),
             graph_cache: Arc::new(RwLock::new(None)),
         }

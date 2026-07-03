@@ -5,7 +5,6 @@ use crate::types::AppState;
 use axum::extract::{Query, State};
 use axum::http::StatusCode;
 use axum::response::Json;
-use solana_client::nonblocking::rpc_client::RpcClient;
 use solana_sdk::pubkey::Pubkey;
 use std::str::FromStr;
 
@@ -41,9 +40,11 @@ pub async fn get_route(
         ));
     }
 
-    // Read pools from shared state — clone and drop the lock immediately
-    // so the read guard doesn't block writers during expensive route enumeration.
-    let pools = {
+    // Build a small quote plan under the pool read lock. The plan clones only
+    // pools used by the selected heuristic routes, then RPC hydration happens
+    // after the lock is released.
+    let builder = state.get_or_build_graph().await;
+    let quote_plan = {
         let guard = state.pools.read().await;
         if guard.is_empty() {
             return Err((
@@ -51,28 +52,13 @@ pub async fn get_route(
                 "Pool data not loaded yet. Call GET /api/pools first.".to_string(),
             ));
         }
-        guard.clone()
+        quote_service::plan_best_routes(&builder, &guard, &input_mint, &output_mint, 10)
     };
 
-    // Get or build cached graph
-    let builder = state.get_or_build_graph().await;
-
-    let rpc_url = std::env::var("SOLANA_RPC_URL")
-        .unwrap_or_else(|_| "https://api.mainnet-beta.solana.com".to_string());
-    let rpc = RpcClient::new(rpc_url);
-
-    // First rank cheap candidates from cached metadata, then hydrate only those
-    // pools with RPC data and re-rank the final quote set.
-    let top_candidates = quote_service::rank_best_routes(
-        &builder,
-        &pools,
-        &input_mint,
-        &output_mint,
-        amount,
-        10,
-        Some(&rpc),
-    )
-    .await;
+    let top_candidates = match quote_plan {
+        Some(plan) => quote_service::execute_quote_plan(plan, amount, 10, Some(&state.rpc)).await,
+        None => Vec::new(),
+    };
 
     // Map to API response objects
     let best_routes: Vec<RankedRoute> = top_candidates

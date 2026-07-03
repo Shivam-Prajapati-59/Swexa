@@ -5,4 +5,4 @@ pub mod swap_math;
 
 pub use pool::*;
 pub use sim_error::*;
-pub use swap_math::*;
+pub use swap_math::{DlmmQuoteParams, SwapResult};

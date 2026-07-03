@@ -572,4 +572,48 @@ mod tests {
         assert!(result.amount_out > 0);
         assert!(result.is_approximate);
     }
+
+    #[test]
+    fn dlmm_sol_usdc_raw_price_does_not_overquote_by_decimals() {
+        let sol = mint(1);
+        let usdc = mint(2);
+        let pool = Pool {
+            metadata: PoolMetadata {
+                id: 2,
+                pubkey: mint(8),
+                protocol: DexProtocol::Meteora,
+                pool_type: PoolType::Dlmm,
+                status: PoolStatus::Active,
+                token_a: PoolToken {
+                    mint: sol,
+                    name: "Wrapped SOL".to_string(),
+                    symbol: "SOL".to_string(),
+                    decimals: 9,
+                    vault: Some(mint(3)),
+                },
+                token_b: PoolToken {
+                    mint: usdc,
+                    name: "USD Coin".to_string(),
+                    symbol: "USDC".to_string(),
+                    decimals: 6,
+                    vault: Some(mint(4)),
+                },
+            },
+            data: PoolData::Dlmm(DlmmState {
+                active_bin_id: None,
+                bin_step: 4,
+                active_price: Some(0.075),
+                reserve_a: Some(2_000_000_000),
+                reserve_b: Some(100_000_000),
+                bins: Vec::new(),
+            }),
+            fee_rate: 0,
+            tvl: Some(1_000_000.0),
+            last_updated_slot: Some(1),
+        };
+
+        let result = pool.simulate_swap(&sol, 1_000_000_000).unwrap();
+
+        assert_eq!(result.amount_out, 75_000_000);
+    }
 }

@@ -3,7 +3,8 @@ use crate::models::sim_error::SimulationError;
 
 const FEE_DENOMINATOR: u128 = 1_000_000;
 const NEWTON_MAX_ITERS: usize = 64;
-const NEWTON_EPSILON: f64 = 1.0;
+const NEWTON_EPSILON: f64 = 1e-9;
+const STABLESWAP_MAX_F64_SCALE: u128 = 1_000_000_000_000;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SwapResult {
@@ -116,8 +117,10 @@ pub fn simulate_stableswap(
     }
 
     let (amount_after_fee, fee) = amount_after_fee(amount_in, fee_rate_ppm)?;
-    let x = (reserve_in as f64) * (multiplier_in as f64);
-    let y = (reserve_out as f64) * (multiplier_out as f64);
+    let normalizer = stable_decimal_normalizer(reserve_in.max(reserve_out).max(amount_after_fee));
+    let x = normalized_u128_to_f64(reserve_in, multiplier_in, normalizer)?;
+    let y = normalized_u128_to_f64(reserve_out, multiplier_out, normalizer)?;
+    let dx_norm = normalized_u128_to_f64(amount_after_fee, multiplier_in, normalizer)?;
     let a = amp_factor as f64;
 
     if x <= 0.0 || y <= 0.0 || a <= 0.0 || !x.is_finite() || !y.is_finite() {
@@ -125,7 +128,6 @@ pub fn simulate_stableswap(
     }
 
     let d = solve_stableswap_d(x, y, a)?;
-    let dx_norm = (amount_after_fee as f64) * (multiplier_in as f64);
     let x_new = x + dx_norm;
     if !x_new.is_finite() || x_new <= x {
         return Err(SimulationError::Overflow);
@@ -136,7 +138,7 @@ pub fn simulate_stableswap(
         return Err(SimulationError::InsufficientLiquidity);
     }
 
-    let dy = (y - y_new) / (multiplier_out as f64);
+    let dy = ((y - y_new) * normalizer as f64) / (multiplier_out as f64);
     if !dy.is_finite() || dy <= 0.0 || dy > u128::MAX as f64 {
         return Err(SimulationError::Overflow);
     }
@@ -153,7 +155,7 @@ pub fn simulate_stableswap(
         amount_out,
         fee_amount: fee,
         price_impact_pct: price_impact_pct_from_spot(spot_out, amount_out),
-        is_approximate: true,
+        is_approximate: false,
     })
 }
 
@@ -221,6 +223,34 @@ fn stableswap_spot_price(x: f64, y: f64, d: f64, a: f64) -> f64 {
     let four_a = 4.0 * a;
     let xy_term = d3 / (4.0 * x * y);
     (four_a + xy_term / x) / (four_a + xy_term / y)
+}
+
+fn stable_decimal_normalizer(max_raw_amount: u128) -> u128 {
+    let mut divisor = 1u128;
+    while max_raw_amount / divisor > STABLESWAP_MAX_F64_SCALE {
+        divisor = divisor.saturating_mul(10);
+    }
+    divisor
+}
+
+fn normalized_u128_to_f64(
+    value: u128,
+    multiplier: u64,
+    divisor: u128,
+) -> Result<f64, SimulationError> {
+    if divisor == 0 || multiplier == 0 {
+        return Err(SimulationError::InsufficientLiquidity);
+    }
+
+    let whole = value / divisor;
+    let remainder = value % divisor;
+    let normalized = whole as f64 + (remainder as f64 / divisor as f64);
+    let scaled = normalized * multiplier as f64;
+    if scaled.is_finite() && scaled > 0.0 {
+        Ok(scaled)
+    } else {
+        Err(SimulationError::Overflow)
+    }
 }
 
 pub fn simulate_clmm_virtual_reserves(
@@ -299,7 +329,7 @@ pub fn simulate_clmm_tick_traversal(
             }
 
             amount_out += active_liquidity * (sqrt_price - target);
-            remaining = remaining.saturating_sub(amount_in_to_target.ceil() as u128);
+            remaining = remaining.saturating_sub(amount_in_to_target.floor() as u128);
             sqrt_price = target;
             active_liquidity -= tick.liquidity_net as f64;
         }
@@ -331,7 +361,7 @@ pub fn simulate_clmm_tick_traversal(
             }
 
             amount_out += active_liquidity * (target - sqrt_price) / (target * sqrt_price);
-            remaining = remaining.saturating_sub(amount_in_to_target.ceil() as u128);
+            remaining = remaining.saturating_sub(amount_in_to_target.floor() as u128);
             sqrt_price = target;
             active_liquidity += tick.liquidity_net as f64;
         }
@@ -534,7 +564,7 @@ pub fn simulate_dlmm_bin_traversal(
                 remaining = 0;
             } else {
                 amount_out += bin.amount_y as f64;
-                remaining = remaining.saturating_sub(max_in_for_bin.ceil() as u128);
+                remaining = remaining.saturating_sub(max_in_for_bin.floor() as u128);
             }
         } else {
             if bin.amount_x == 0 {
@@ -550,7 +580,7 @@ pub fn simulate_dlmm_bin_traversal(
                 remaining = 0;
             } else {
                 amount_out += bin.amount_x as f64;
-                remaining = remaining.saturating_sub(max_in_for_bin.ceil() as u128);
+                remaining = remaining.saturating_sub(max_in_for_bin.floor() as u128);
             }
         }
     }

@@ -20,30 +20,26 @@ pub async fn hydrate_candidate_pools(
 ) -> Vec<Pool> {
     let target_ids = candidate_pool_ids(candidates);
     if target_ids.is_empty() {
-        return pools.to_vec();
+        return Vec::new();
     }
 
-    let mut hydrated = pools.to_vec();
-    let index_by_id: HashMap<PoolId, usize> = hydrated
-        .iter()
-        .enumerate()
-        .map(|(index, pool)| (pool.pool_id(), index))
-        .collect();
+    let pool_by_id: HashMap<PoolId, &Pool> =
+        pools.iter().map(|pool| (pool.pool_id(), pool)).collect();
+    let mut hydrated = Vec::with_capacity(target_ids.len());
 
     for pool_id in target_ids {
-        let Some(index) = index_by_id.get(&pool_id).copied() else {
+        let Some(pool) = pool_by_id.get(&pool_id).copied() else {
             continue;
         };
 
-        let pool = hydrated[index].clone();
         let hydrated_pool = match pool.metadata.protocol {
-            DexProtocol::Whirlpool => hydrate_whirlpool(pool, rpc).await,
-            DexProtocol::Meteora => hydrate_meteora(pool, rpc).await,
-            _ => Ok(pool),
+            DexProtocol::Whirlpool => hydrate_whirlpool(pool.clone(), rpc).await,
+            DexProtocol::Meteora => hydrate_meteora(pool.clone(), rpc).await,
+            _ => Ok(pool.clone()),
         };
 
         match hydrated_pool {
-            Ok(pool) => hydrated[index] = pool,
+            Ok(pool) => hydrated.push(pool),
             Err(error) => log::warn!("Pool hydration failed for pool {pool_id}: {error:#}"),
         }
     }
